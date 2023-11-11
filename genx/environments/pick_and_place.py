@@ -21,10 +21,10 @@ class CompPickPlaceCanEnv(gym.Env):
         )
         self.tasks = ['reach', 'lift', 'move', 'place']
         self.action_spaces = {
-            'reach': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32),
-            'lift': gym.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-            'move': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32),
-            'place': gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
+            'reach': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32), # (x,y,z)
+            'lift': gym.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32), # (z,g)
+            'move': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32), # (x,y,z)
+            'place': gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32) # (x,y,z,g)
         }
         self.observation_spaces = {
             'reach': gym.spaces.Box(low=-10, high=10, shape=(6,), dtype=np.float32),
@@ -57,10 +57,12 @@ class CompPickPlaceCanEnv(gym.Env):
     def _get_obs(self):
         obs = self._env._get_observations()
 
-        hand_pos = obs['robot0_eef_pos']
-        can_pos = obs['Can_pos']
-        gripper = obs['robot0_gripper_qpos'][0] * 2
-        goal_pos = self._env.target_bin_placements[self._env.object_to_id['can']]
+        hand_pos = obs['robot0_eef_pos'] # end effector position (x,y,z)
+        can_pos = obs['Can_pos'] # can position (c_x,c_y,c_z)
+        gripper = obs['robot0_gripper_qpos'][0] * 2 # scalar
+
+        # goal position (g_x, g_y, g_z)
+        goal_pos = self._env.target_bin_placements[self._env.object_to_id['can']] 
 
         if self.baseline_mode:
             obs = np.concatenate([hand_pos, can_pos, goal_pos, [gripper]]).astype(np.float32)
@@ -69,6 +71,7 @@ class CompPickPlaceCanEnv(gym.Env):
         if self.current_task == 'reach':
             obs = np.concatenate([hand_pos, can_pos]).astype(np.float32)
         elif self.current_task == 'lift':
+            # z positions of end-effector and can + gripper
             obs = np.concatenate([hand_pos[2:3], can_pos[2:3], [gripper]]).astype(np.float32)
         elif self.current_task == 'move':
             obs = hand_pos.astype(np.float32)

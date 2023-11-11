@@ -4,7 +4,10 @@
 __pycache__/
 *.so
 *~
+*.zip
 
 build
 env
 experiments
+
+TODO.md

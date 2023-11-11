@@ -1,0 +1,1 @@
+python -m scripts.eval_sac --path=experiments/CompPickPlaceCan-v1/20231108-103804-id-733/ --suffix=_100000
