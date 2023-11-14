@@ -4,12 +4,12 @@ import numpy as np
 from robosuite import load_controller_config
 from gymnasium.envs.registration import register
 
-class CompPickPlaceEnv(gym.Env):
-    def __init__(self, robot="Panda", env="PickPlaceCan", baseline_mode=False):
+class CompLiftEnv(gym.Env):
+    def __init__(self, robot="Panda", baseline_mode=False):
         config = load_controller_config(default_controller='OSC_POSITION')
         self._robot = robot
         self._env = robosuite.make(
-            env_name=env,
+            env_name="Lift",
             robots=self._robot,
             controller_configs=config,
             has_renderer=True,
@@ -17,24 +17,19 @@ class CompPickPlaceEnv(gym.Env):
             ignore_done=False,
             use_camera_obs=False,
             control_freq=10,
-            horizon=200
+            horizon=100
         )
-        self.tasks = ['reach', 'lift', 'move', 'place']
+        self.tasks = ['reach', 'lift']
         self.action_spaces = {
-            'reach': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32), # (x,y,z)
-            'lift': gym.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32), # (z,g)
-            'move': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32), # (x,y,z)
-            'place': gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32) # (x,y,z,g)
+            'reach': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32),
+            'lift': gym.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
         }
         self.observation_spaces = {
             'reach': gym.spaces.Box(low=-10, high=10, shape=(6,), dtype=np.float32),
             'lift': gym.spaces.Box(low=-10, high=10, shape=(3,), dtype=np.float32),
-            'move': gym.spaces.Box(low=-10, high=10, shape=(3,), dtype=np.float32),
-            'place': gym.spaces.Box(low=-10, high=10, shape=(10,), dtype=np.float32)
         }
 
         self.current_task = 'reach'
-        self.init_can_pos = None
         self.reward_criteria = None
         self.setup_skip_reset_once = False
         self.fresh_reset = False
@@ -50,40 +45,28 @@ class CompPickPlaceEnv(gym.Env):
     @property
     def observation_space(self):
         if self.baseline_mode:
-            return gym.spaces.Box(low=-10, high=10, shape=(10,), dtype=np.float32)
+            return gym.spaces.Box(low=-10, high=10, shape=(7,), dtype=np.float32)
         else:
             return self.observation_spaces[self.current_task]
 
     def _get_obs(self):
         obs = self._env._get_observations()
 
-        hand_pos = obs['robot0_eef_pos'] # end effector position (x,y,z)
-        can_pos = obs['Can_pos'] # can position (c_x,c_y,c_z)
-        gripper = obs['robot0_gripper_qpos'][0] * 2 # scalar
-
-        # goal position (g_x, g_y, g_z)
-        goal_pos = self._env.target_bin_placements[self._env.object_to_id['can']] 
+        hand_pos = obs['robot0_eef_pos']
+        cube_pos = obs['cube_pos']
+        gripper = obs['robot0_gripper_qpos'][0] * 2
 
         if self.baseline_mode:
-            obs = np.concatenate([hand_pos, can_pos, goal_pos, [gripper]]).astype(np.float32)
+            obs = np.concatenate([hand_pos, cube_pos, [gripper]]).astype(np.float32)
             return obs
 
         if self.current_task == 'reach':
-            obs = np.concatenate([hand_pos, can_pos]).astype(np.float32)
+            obs = np.concatenate([hand_pos, cube_pos]).astype(np.float32)
         elif self.current_task == 'lift':
-            # z positions of end-effector and can + gripper
-            obs = np.concatenate([hand_pos[2:3], can_pos[2:3], [gripper]]).astype(np.float32)
-        elif self.current_task == 'move':
-            obs = hand_pos.astype(np.float32)
-        elif self.current_task == 'place':
-            obs = np.concatenate([hand_pos, can_pos, goal_pos, [gripper]]).astype(np.float32)
+            obs = np.concatenate([hand_pos[2:3], cube_pos[2:3], [gripper]]).astype(np.float32)
         else:
             raise RuntimeError('Invalid task')
         return obs
-    
-    def _get_can_pos(self):
-        obs = self._env._get_observations()
-        return obs['Can_pos']
 
     def _process_action(self, action):
         if self.baseline_mode:
@@ -93,23 +76,15 @@ class CompPickPlaceEnv(gym.Env):
             action = np.concatenate([[0, 0], action])
         if self.current_task == 'reach':
             action = np.concatenate([action, [-1]])
-        elif self.current_task == 'move':
-            action = np.concatenate([action, [1]])
         return action
     
     def _compute_reward_criteria(self, observation):
         hand_pos = observation['robot0_eef_pos'].copy()
-        can_pos = observation['Can_pos'].copy()
-        reach_dist = np.linalg.norm(can_pos + np.array([0, 0, 0.005]) - hand_pos)
-        move_dist = 0.03 - hand_pos[1]
-        goal_dist = np.linalg.norm(can_pos - self._env.target_bin_placements[self._env.object_to_id['can']])
-        can_displacement = np.linalg.norm(can_pos - self.init_can_pos)
+        cube_pos = observation['cube_pos'].copy()
+        reach_dist = np.linalg.norm(cube_pos - hand_pos)
         criteria = {
             'reach_dist': reach_dist,
-            'move_dist': move_dist,
-            'goal_dist': goal_dist,
-            'can_displacement': can_displacement,
-            'can_height': can_pos[2]
+            'cube_height': cube_pos[2]
         }
         return criteria
 
@@ -120,33 +95,18 @@ class CompPickPlaceEnv(gym.Env):
         new_reward_criteria = self._compute_reward_criteria(observation)
         if self.baseline_mode:
             task_reward = self.reward_criteria['reach_dist'] - new_reward_criteria['reach_dist']
-            task_reward += new_reward_criteria['can_height'] - self.reward_criteria['can_height']
-            task_reward += self.reward_criteria['goal_dist'] - new_reward_criteria['goal_dist']
+            task_reward += new_reward_criteria['cube_height'] - self.reward_criteria['cube_height']
         else:
             if self.current_task == 'reach':
                 task_reward = self.reward_criteria['reach_dist'] - new_reward_criteria['reach_dist']
-                # task_reward = -reach_dist * np.exp(reach_dist)
-                if new_reward_criteria['can_displacement'] > 0.01:
-                    task_failed = True
-                elif new_reward_criteria['reach_dist'] < 0.01:
+                if new_reward_criteria['reach_dist'] < 0.01:
                     task_completed = True
             elif self.current_task == 'lift':
                 task_reward = self.reward_criteria['reach_dist'] - new_reward_criteria['reach_dist']
-                task_reward += new_reward_criteria['can_height'] - self.reward_criteria['can_height']
-                # task_reward = -grasp_dist * np.exp(grasp_dist)
-                if observation['Can_pos'][2] > 1: # z pos of can?
-                    task_completed = True
-            elif self.current_task == 'move':
-                task_reward = self.reward_criteria['move_dist'] - new_reward_criteria['move_dist']
-                # task_reward = -move_dist * np.exp(move_dist)
-                if observation['robot0_eef_pos'][1] > 0.03:
-                    task_completed = True
-            elif self.current_task == 'place':
-                task_reward = self.reward_criteria['goal_dist'] - new_reward_criteria['goal_dist']
-                # task_reward = -goal_dist * np.exp(goal_dist)
+                task_reward += new_reward_criteria['cube_height'] - self.reward_criteria['cube_height']
 
-        if task_completed:
-            task_reward = 10
+            if task_completed:
+                task_reward = 10
 
         self.reward_criteria = new_reward_criteria
         return task_reward, task_completed, task_failed
@@ -196,7 +156,6 @@ class CompPickPlaceEnv(gym.Env):
             observation = self._env.reset()
             obs = self._get_obs()
             self.current_task = 'reach'
-            self.init_can_pos = self._get_can_pos()
             self.reward_criteria = self._compute_reward_criteria(observation)
         self.fresh_reset = True
         return obs, {'current_task': self.current_task,
@@ -212,25 +171,25 @@ class CompPickPlaceEnv(gym.Env):
 
 def register_envs():
     register(
-        id="CompPickPlaceCan-Panda",
-        entry_point=CompPickPlaceEnv,
-        max_episode_steps=100
+        id="CompLift-Panda",
+        entry_point=CompLiftEnv,
+        max_episode_steps=50
     )
     register(
-        id="BaselineCompPickPlaceCan-Panda",
-        entry_point=CompPickPlaceEnv,
-        max_episode_steps=100,
+        id="BaselineCompLift-Panda",
+        entry_point=CompLiftEnv,
+        max_episode_steps=50,
         kwargs={'baseline_mode': True}
     )
     register(
-        id="BaselineCompPickPlaceCan-IIWA",
-        entry_point=CompPickPlaceEnv,
-        max_episode_steps=100,
+        id="CompLift-IIWA",
+        entry_point=CompLiftEnv,
+        max_episode_steps=50,
+        kwargs={'robot': 'IIWA'}
+    )
+    register(
+        id="BaselineCompLift-IIWA",
+        entry_point=CompLiftEnv,
+        max_episode_steps=50,
         kwargs={'robot': 'IIWA', 'baseline_mode': True}
     )
-    # register(
-    #     id="BaselineCompPickPlaceBread-v1",
-    #     entry_point=CompPickPlaceEnv,
-    #     max_episode_steps=100,
-    #     kwargs={'env_name': 'PickPlaceBread', 'baseline_mode': True}
-    # )
