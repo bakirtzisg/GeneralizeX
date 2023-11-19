@@ -17,4 +17,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-exclude = ["experiments*"]
+exclude = ["experiments*", "results*", "shell_scripts*", "scripts*"]
