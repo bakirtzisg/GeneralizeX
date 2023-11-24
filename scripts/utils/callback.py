@@ -1,63 +1,32 @@
-from stable_baselines3.common.callbacks import BaseCallback
+import numpy as np
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 
-class LoggerCallback(BaseCallback):
+class StopTrainingOnSuccessRateThreshold(BaseCallback):
     """
-        TODO: log success rates to tensorboard
+    Stop the training once a threshold in success rate
+    has been reached (i.e. when the model is good enough).
+
+    It must be used with the ``EvalCallback``.
+
+    :param success_threshold:  Minimum success rate per episode
+        to stop training.
+    :param verbose: Verbosity level: 0 for no output, 
+        1 for indicating when training ended because 
+        episodic success rate threshold reached
     """
-    def __init__(self, verbose=0):
-        super.__init__(verbose)  
-        # Those variables will be accessible in the callback
-        # (they are defined in the base class)
-        # The RL model
-        # self.model = None  # type: BaseAlgorithm
-        # An alias for self.model.get_env(), the environment used for training
-        # self.training_env = None  # type: Union[gym.Env, VecEnv, None]
-        # Number of time the callback was called
-        # self.n_calls = 0  # type: int
-        # self.num_timesteps = 0  # type: int
-        # local and global variables
-        # self.locals = None  # type: Dict[str, Any]
-        # self.globals = None  # type: Dict[str, Any]
-        # The logger object, used to report things in the terminal
-        # self.logger = None  # stable_baselines3.common.logger
-        # # Sometimes, for event callback, it is useful
-        # # to have access to the parent object
-        # self.parent = None  # type: Optional[BaseCallback]
+    parent: EvalCallback
 
-    def _on_training_start(self) -> None:
-        """
-        This method is called before the first rollout starts.
-        """
-        pass
-
-    def _on_rollout_start(self) -> None:
-        """
-        A rollout is the collection of environment interaction
-        using the current policy.
-        This event is triggered before collecting new samples.
-        """
-        pass
+    def __init__(self, success_threshold: float, verbose: int = 0):
+        super().__init__(verbose=verbose)
+        self.success_threshold = success_threshold
 
     def _on_step(self) -> bool:
-        """
-        This method will be called by the model after each call to `env.step()`.
-
-        For child callback (of an `EventCallback`), this will be called
-        when the event is triggered.
-
-        :return: If the callback returns False, training is aborted early.
-        """
-        
-        return True
-
-    def _on_rollout_end(self) -> None:
-        """
-        This event is triggered before updating the policy.
-        """
-        pass
-
-    def _on_training_end(self) -> None:
-        """
-        This event is triggered before exiting the `learn()` method.
-        """
-        pass
+        assert self.parent is not None, "``StopTrainingOnSuccessRateThreshold`` callback must be used with an ``EvalCallback``"
+        success_rate = np.mean(self.parent._is_success_buffer)
+        continue_training = bool(success_rate < self.success_threshold)
+        if self.verbose >= 1 and not continue_training:
+            print(
+                f"Stopping training because the mean success rate {success_rate:.2f} "
+                f" is above the threshold {self.success_threshold}"
+            )
+        return continue_training

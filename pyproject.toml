@@ -13,7 +13,7 @@ dependencies = [
     "torch",
     "tensorboard",
     "stable_baselines3",
-    "seaborn"
+    "sklearn",
 ]
 
 [tool.setuptools.packages.find]

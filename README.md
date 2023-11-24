@@ -1,4 +1,4 @@
-# GeneralizationX
+# GeneralizeX
 
 ## Setup
 ```
