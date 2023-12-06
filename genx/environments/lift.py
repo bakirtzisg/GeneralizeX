@@ -18,7 +18,7 @@ class CompLiftEnv(gym.Env):
         
         self.current_task = self.tasks[0]
 
-        # Create separate environments for each subtask
+        # Create the default robosuite lift environment
         self._env = robosuite.make(
             env_name="Lift",
             robots=self._robot,
@@ -210,9 +210,9 @@ class CompLiftEnv(gym.Env):
         self.reward_criteria = new_reward_criteria
         return task_reward, task_completed, task_failed
 
-    def step(self, action):
+    def step(self, task_action):
         self.fresh_reset = False
-        action = self._process_action(action)
+        action = self._process_action(task_action)
         observation, reward, done, info = self._env.step(action)
         task_reward, task_completed, task_failed = self._evaluate_task(observation)
         obs = self._get_obs()
@@ -225,8 +225,9 @@ class CompLiftEnv(gym.Env):
         info['task_truncated'] = truncated                      # step terminated
         info['task_reward'] = task_reward                       # task reward
         info['current_task_obs'] = obs                          # task observation
-        info['current_action'] = action                         # task action
+        info['current_task_action'] = task_action               # task action
         info['observation'] = observation                       # robosuite observation
+        info['action'] = action                                 # robosuite action
         info['is_success'] = True if task_completed else False  # subtask success 
         info['task_success'] = False                            # entire task success
         # If baseline_mode, always reset current_task to first task (reach)

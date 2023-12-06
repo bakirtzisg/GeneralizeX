@@ -9,13 +9,13 @@ def find_file(dir, prefix=''):
 
     return file[0]
 
-def load_sac_policy(dir, baseline, tasks_list):
+def load_sac_policy(dir, baseline, tasks):
     agents = {}
     if baseline:
         TASK_MODEL_FILE = find_file(dir, 'baseline_final*.zip')
         agents['baseline'] = SAC.load(TASK_MODEL_FILE)
     else:
-        for task in tasks_list:
+        for task in tasks:
             TASK_MODEL_FILE = find_file(dir, f'{task}*.zip')
             agents[task] = SAC.load(TASK_MODEL_FILE)
 

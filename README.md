@@ -12,7 +12,7 @@ robosuite private macro file:
 python $PWD/env/lib/python3.9/site-packages/robosuite/scripts/setup_macros.py
 ```
 
-To resolve PyTorch 2.1 ImportError:
+To resolve PyTorch 2.1 ImportError (may not be necessary):
 ```
 source shell_scripts/fix_torch.sh
 ```

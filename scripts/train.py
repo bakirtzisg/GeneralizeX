@@ -27,7 +27,7 @@ if __name__ == '__main__':
     # Training parameters
     parser.add_argument('--success_thres', type=float, default=0.95)
     parser.add_argument('--gamma', type=float, default=0.96)
-    parser.add_argument('--epochs', type=int, default=int(1.5e4))
+    parser.add_argument('--epochs', type=int, default=int(1.6e4))
     parser.add_argument('--eval_freq', type=int, default=int(1e4))
     parser.add_argument('--eval_ep', type=int, default=20)
     parser.add_argument('--save_freq',type=int,default=int(5e3))
