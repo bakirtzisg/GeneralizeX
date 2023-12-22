@@ -8,7 +8,6 @@ from gymnasium.envs.registration import register
 
 class CompLiftEnv(gym.Env):
     def __init__(self, robot="Panda", baseline_mode=False, training_mode=False, verbose=True):
-        # Why not OSC_POSE?
         self._controller_config = load_controller_config(default_controller='OSC_POSITION')
         self._robot = robot
         self._verbose = verbose
@@ -37,6 +36,10 @@ class CompLiftEnv(gym.Env):
         # hard-coded (for IIWA)
         # self._robot_init_qpos['grasp'] = [0.01231588, 0.99710506, -0.02401533, -1.51316928, 0.03385481, 0.6337215, -0.02739373]
         # self._robot_init_qpos['lift'] = [0.01231588, 0.99710506, -0.02401533, -1.51316928, 0.03385481, 0.6337215, 0.89631194]
+
+        # init joint positions for Panda (hard-coded)
+        self._robot_init_qpos['grasp'] = [-0.02296645, 0.87523372, -0.00537831, -2.07363196, 0.02362597, 2.94811447, 0.73588951]
+        # self._robot_init_qpos['lift'] = [-0.023814369, 0.937344171, 0.000128018001, -1.96319784, 0.000138185644, 2.89760903, 0.764912129]
 
         if self._verbose:
             print(f'{self.current_task} initial joint configuration: {self._robot_init_qpos[self.current_task]}')
@@ -210,10 +213,10 @@ class CompLiftEnv(gym.Env):
         self.reward_criteria = new_reward_criteria
         return task_reward, task_completed, task_failed
 
-    def step(self, task_action):
+    def step(self, action):
         self.fresh_reset = False
-        action = self._process_action(task_action)
-        observation, reward, done, info = self._env.step(action)
+        task_action = self._process_action(action)
+        observation, reward, done, info = self._env.step(task_action)
         task_reward, task_completed, task_failed = self._evaluate_task(observation)
         obs = self._get_obs()
 
