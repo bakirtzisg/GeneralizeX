@@ -6,6 +6,8 @@ from robosuite import load_controller_config
 from robosuite.robots.robot import Robot
 from gymnasium.envs.registration import register
 
+# from scripts.utils.wrapper import MDP
+
 class CompLiftEnv(gym.Env):
     def __init__(self, robot="Panda", baseline_mode=False, training_mode=False, verbose=True):
         self._controller_config = load_controller_config(default_controller='OSC_POSITION')
@@ -38,7 +40,7 @@ class CompLiftEnv(gym.Env):
         # self._robot_init_qpos['lift'] = [0.01231588, 0.99710506, -0.02401533, -1.51316928, 0.03385481, 0.6337215, 0.89631194]
 
         # init joint positions for Panda (hard-coded)
-        self._robot_init_qpos['grasp'] = [-0.02296645, 0.87523372, -0.00537831, -2.07363196, 0.02362597, 2.94811447, 0.73588951]
+        # self._robot_init_qpos['grasp'] = [-0.02296645, 0.87523372, -0.00537831, -2.07363196, 0.02362597, 2.94811447, 0.73588951]
         # self._robot_init_qpos['lift'] = [-0.023814369, 0.937344171, 0.000128018001, -1.96319784, 0.000138185644, 2.89760903, 0.764912129]
 
         if self._verbose:
@@ -63,6 +65,7 @@ class CompLiftEnv(gym.Env):
         self.fresh_reset = False
         # In baseline mode, we train all tasks at once, so training_mode=False
         self.baseline_mode = baseline_mode
+        # In training mode, we train one subtask at a time.
         self.training_mode = False if self.baseline_mode else training_mode 
 
     @property
@@ -258,6 +261,9 @@ class CompLiftEnv(gym.Env):
             next_task = self.tasks[self.tasks.index(self.current_task) + 1]
             if task_completed:
                 # Continuously update robot initial qpos for next subtask (this is inefficient...)
+                # TODO: initial qpos should depend on block location (which varies). Get block location from simulator?
+                # TODO: inverse kinematics to self._env.sim.data.body_xpos[self._env.cube_body_id] w/ gripper open?
+                # TODO: or run reach first???? this sounds better...
                 self._robot_init_qpos[next_task] = np.arctan2(
                     observation['robot0_joint_pos_sin'],
                     observation['robot0_joint_pos_cos'],
@@ -269,6 +275,15 @@ class CompLiftEnv(gym.Env):
 
     def _setup_skip_reset(self):
         self.setup_skip_reset_once = True
+    
+    def _reset_robot_init_qpos(self):
+        # TODO: rollout previous policies to set _robot_init_qpos???
+        # if (self.current_task != self.tasks[0]):
+            # run previous policies
+            # mdp = MDP()
+            # data = rollout(mdp)
+            # self._robot_init_qpos = data['rollout_0']['obs'][-1]
+        return self._robot_init_qpos[self.current_task]
 
     def reset(self, seed=None, options=None):
         if self.setup_skip_reset_once:
@@ -283,7 +298,7 @@ class CompLiftEnv(gym.Env):
             self._env.reset()
             if self.training_mode:
                 # Reset initial joint configuration to correct init_qpos based on subtask
-                self._env.robots[0].init_qpos = self._robot_init_qpos[self.current_task]
+                self._env.robots[0].init_qpos = self._reset_robot_init_qpos()
                 # Reset robot to reset to new init_qpos
                 self._env.robots[0].reset(deterministic=True)
 

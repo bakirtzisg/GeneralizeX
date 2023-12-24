@@ -48,12 +48,14 @@ def train(args):
     
     agents = {} 
     tasks = ['baseline'] if BASELINE_MODE else env.unwrapped.tasks
+    for task in SKIP_TASKS:
+        tasks.remove(task)
     # Initialize SAC policy for all tasks
     for task in tasks:
         env.unwrapped.current_task = task
         if RESUME_TRAINING:
             # Pattern-match task policy path
-            TASK_MODEL_PATH = find_file(MODEL_PATH, f'{task}*.zip')
+            TASK_MODEL_PATH = find_file(MODEL_PATH, prefix=f'{task}/best_model.zip')
             # Load previously trained task policy
             if POLICY == 'SAC':
                 agents[task] = SAC.load(TASK_MODEL_PATH,                      
@@ -86,9 +88,6 @@ def train(args):
     
     # Train subtask policies sequentially
     for task, agent in agents.items():
-        # If applicable, skip certain tasks during training
-        if task in SKIP_TASKS:
-            continue
         # Setup current task of environment
         if not BASELINE_MODE:
             env.unwrapped.current_task = task
@@ -99,7 +98,7 @@ def train(args):
         eval_env.unwrapped.reset()
 
         print(f'TRAINING {env.unwrapped.current_task}')
-        print(f'training_mode = {env.unwrapped.training_mode}')
+        # print(f'training_mode = {env.unwrapped.training_mode}')
 
         # Stop training on success rate threshold callback
         stop_training_callback = StopTrainingOnSuccessRateThreshold(success_threshold=SUCCESS_THRESHOLD, verbose=1)

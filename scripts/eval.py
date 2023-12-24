@@ -11,54 +11,54 @@ from stable_baselines3 import SAC
 from utils.util import *
 from utils.wrapper import MDP
 
-def rollout(env, agents, baseline_mode, eval_eps=10, tasks=None, render=True):
-    # If only evaluating one subtask (instead of the entire composed task)
-    if len(tasks) == 1:
-        env.unwrapped.training_mode = True
-        env.unwrapped.current_task = tasks[0]
+def rollout(env, agents, baseline_mode, eps=1, tasks=None, render=True):
+    assert all([task in env.unwrapped.tasks for task in tasks]), \
+        f'Invalid tasks {tasks} for {env} environment'
+    env.unwrapped.tasks = tasks # TODO: check that order is preserved 
 
     stats = {}
     done = False
-    eps = 0
+    e = 0
     success = 0
+    subtask_obs_buffer = []
     q_buffer = []
     action_buffer = []
     reward_buffer = []
     env.reset()
 
-    while eps < eval_eps:
+    while e < eps:
         if done:
-            stats[f'rollout_{eps}'] = {}
+            stats[f'rollout_{e}'] = {}
             if info['task_success']: 
                 print("Episode success")
-                stats[f'rollout_{eps}']['is_success'] = 1
+                stats[f'rollout_{e}']['is_success'] = 1
                 success += 1
             else:
                 print('Episode failed')
                 print(f'Subtask {env.unwrapped.current_task} success:', info['is_success'])
-                stats[f'rollout_{eps}']['is_success'] = 0
+                stats[f'rollout_{e}']['is_success'] = 0
             
-            stats[f'rollout_{eps}']['obs'] = np.array(q_buffer)
-            stats[f'rollout_{eps}']['action'] = np.array(action_buffer)
-            stats[f'rollout_{eps}']['reward'] = np.array(reward_buffer)
+            stats[f'rollout_{e}']['obs'] = np.array(q_buffer)
+            stats[f'rollout_{e}']['subtask_obs'] = np.array(subtask_obs_buffer)
+            stats[f'rollout_{e}']['action'] = np.array(action_buffer)
+            stats[f'rollout_{e}']['reward'] = np.array(reward_buffer)
             
             # data = concatenate the obs, actions, and rewards by timestep
             # np.shape = ((obs,action,reward),timesteps)
-            stats[f'rollout_{eps}']['data'] = np.vstack((np.array(q_buffer).T,
-                                                         np.array(action_buffer).T,
-                                                         np.array(reward_buffer).T,
-                                                         )) 
-            
+            stats[f'rollout_{e}']['data'] = np.vstack((np.array(subtask_obs_buffer).T,
+                                                       np.array(action_buffer).T,
+                                                       np.array(reward_buffer).T,
+                                                     ))     
             # reset buffers
             q_buffer = []
+            subtask_obs_buffer = []
             action_buffer = []
             reward_buffer = []
 
-            env.unwrapped.fresh_reset = True if env.unwrapped.current_task == tasks[-1] else False
-            # print('Current task?', env.unwrapped.current_task)
-            # print('Fresh reset?', env.unwrapped.fresh_reset)
+            env.unwrapped.fresh_reset = True
             obs, info = env.reset()
-            eps = eps + 1
+            if len(tasks) == 1: env.unwrapped.current_task = tasks[0]
+            e = e + 1
         
         # Debug: Check init_qpos is correct (TODO: move somewhere else)
         # env.unwrapped._env.robots[0].init_qpos = env.unwrapped._robot_init_qpos[env.unwrapped.current_task]
@@ -85,24 +85,24 @@ def rollout(env, agents, baseline_mode, eval_eps=10, tasks=None, render=True):
         q_sin = observation['robot0_joint_pos_sin']
         q_cos = observation['robot0_joint_pos_cos']
         q = np.arctan2(q_sin, q_cos)
-        # print(observation)
 
         q_buffer.append(q) 
+        subtask_obs_buffer.append(info['current_task_obs'])
         action_buffer.append(info['current_task_action'])
         reward_buffer.append(reward)
 
         if render:
             env.render()
 
-    stats['success_rate'] = (success / eval_eps) * 100
+    stats['success_rate'] = (success / eps) * 100
 
     env.close()
     return stats
 
-def rollout_mdp(M, eval_eps=1, render=True):
+def rollout_mdp(M, eps=1, render=True):
     ''' rollout using MDP wrapper '''
     assert isinstance(M, MDP)
-    stats = rollout(M.env, M.agent, M.baseline, eval_eps=eval_eps, tasks=M.tasks, render=render)
+    stats = rollout(M.env, M.agent, M.baseline, eps=eps, tasks=M.tasks, render=render)
     return stats
 
 if __name__ == '__main__':
@@ -127,9 +127,10 @@ if __name__ == '__main__':
         )
 
     # Evaluate
-    info = rollout_mdp(M, eval_eps=args.eps)
+    info = rollout_mdp(M, eps=args.eps)
     print(info['rollout_0']['obs'])
     # print(info['rollout_0']['action'])
     # print(info['rollout_0']['reward'])
     # print(np.shape(info['rollout_0']['data']))
+    # print(get_PPO_prob_dist(M.agent['reach'], info['rollout_0']['subtask_obs'][0]))
     print(f'Success rate: {info["success_rate"]}')
