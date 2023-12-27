@@ -5,10 +5,8 @@
     - a metric MDP (one specific compositional RL policy?)
     - a set of compositional structures G (set of compositional RL policies)
 
-    Learn maps using
-    - optimization (cvx?)
-    - scipy.optimize (linear?)
-    - RL (jax?)
+    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models
+
 '''
 import numpy as np
 import random 
@@ -26,10 +24,13 @@ from utils.wrapper import MDP
 from utils.torch_utils import RobotDataset
 
 def learn_linear_maps(M, G):
+    print('--- Training linear maps ---')
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # TODO: optimize together (multi-objective optimization) or separately?
-    f = nn.Linear(7, 7) # TODO: what dimensions? num of states (only position? include velocity?)
-    g = nn.Linear(7, 7)
+    # TODO: generalize to not only reach. Think about input/output dims for f and g
+    f = nn.Linear(M.state_space_dim['reach'][0], G.state_space_dim['reach'][0]) 
+    g = nn.Linear(M.state_space_dim['reach'][0], G.state_space_dim['reach'][0]) 
+
     f.to(device)
     g.to(device)
 
@@ -37,7 +38,7 @@ def learn_linear_maps(M, G):
     f_optimizer = torch.optim.SGD(f.parameters(), lr=learning_rate)
     g_optimizer = torch.optim.SGD(g.parameters(), lr=learning_rate)
 
-    num_epochs = 10000
+    num_epochs = 1
 
     num_batches = 10
     batch_size = 15
@@ -50,21 +51,23 @@ def learn_linear_maps(M, G):
         M_training_data = DataLoader(RobotDataset(M), batch_size=batch_size)
         G_training_data = DataLoader(RobotDataset(G), batch_size=batch_size)
 
-
         for i, (M_data, G_data) in enumerate(zip(M_training_data, G_training_data)):
             ''' 
             TODO
              - [x] try getting action distribution from PPO
              - [x] finish batch sampling
-             - [ ] finish reward function
+             - [x] finish reward function
              - [ ] test linear fitting
              - [ ] try neural network fitting
+             
+             lower priority
+             - [ ] seperate script to generate dataset rather than generating dataset on the fly
+             - (faster way to generate dataset ^)
             '''
-            M_data = M_data.to(device)
-            G_data = G_data.to(device)
 
-            print('M data', M_data.size())
-            print('G data', G_data.size())
+            # print('M data transposed shape', torch.transpose(M_data, 0, 1).size())
+            M_data.to(device)
+            G_data.to(device)
 
             loss_fn = rlxBisimLoss
             loss = loss_fn(f, 
@@ -90,6 +93,8 @@ def learn_linear_maps(M, G):
         # evaluation
         # f.eval()
         # g.eval()
+    
+    return f, g
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -118,3 +123,5 @@ if __name__ == '__main__':
                 )
 
     f, g = learn_linear_maps(input_mdp, output_mdp)
+
+    print(f)

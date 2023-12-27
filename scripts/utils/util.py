@@ -45,7 +45,7 @@ def get_PPO_prob_dist(agent, obs):
     dist = agent.policy.get_distribution(obs)
 
     assert isinstance(dist.distribution, torch.distributions.normal.Normal)
-    # probs = dist.log_prob
-    # probs_np = probs.detach().numpy()
 
-    return dist.distribution.loc, dist.distribution.scale
+    # TODO: or just return the torch normal distribution dist.distribution instead?
+    # return [dist.distribution.loc, dist.distribution.scale]
+    return dist.distribution

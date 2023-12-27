@@ -14,6 +14,9 @@ class MDP():
                                  tasks=self.tasks,
                                  prefix=prefix)
         
+        self.state_space_dim = {f'{task}': self.env.unwrapped.observation_spaces[f'{task}'].shape for task in tasks}
+        self.action_space_dim = {f'{task}': self.env.unwrapped.action_spaces[f'{task}'].shape for task in tasks}
+
         if isinstance(env, str):
             assert env.lower() in dir.lower(), 'Sanity check to make sure policy matches environment'
         
