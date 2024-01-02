@@ -1,19 +1,25 @@
 '''
-    Learn maps (f,g) where f: S -> S' and g: A -> A'
+    Domain-specific generalization -- learn maps (f,g) where f: S -> S' and g: A -> A'
 
     Input
-    - a metric MDP (one specific compositional RL policy?)
+    - a metric MDP (a specific compositional RL policy)
     - a set of compositional structures G (set of compositional RL policies)
 
-    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models
+    Output
+    - (f,g,epsilon)
+
+    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models --epochs=200
 
 '''
+import os
+from time import strftime
+
 import numpy as np
-import random 
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from sklearn.neural_network import MLPRegressor
 
@@ -21,54 +27,73 @@ from argparse import ArgumentParser
 from utils.torch_utils import rlxBisimLoss
 
 from utils.wrapper import MDP
-from utils.torch_utils import RobotDataset
+from utils.torch_utils import RobotDataset, MLP
 
-def learn_linear_maps(M, G):
-    print('--- Training linear maps ---')
+def learn_maps(M: MDP, G: MDP, map_type: str = 'linear', epochs: int = 100):
+    '''
+        :param M: input MDP
+        :param G: output MDP
+        :param map_type: specify map parameterization (e.g. linear, mlp)
+        :param epochs: number of training epochs
+    '''
+    save_path = os.path.join(os.path.curdir, f'results/maps/{strftime("%Y%m%d-%H%M%S")}-id-{np.random.randint(10000)}')
+    log_path = os.path.join(save_path, 'log')
+    if not os.path.exists(log_path): os.makedirs(log_path)
+    writer = SummaryWriter(log_path)
+
+    print(f'--- Training {map_type} maps ---')
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
     # TODO: optimize together (multi-objective optimization) or separately?
     # TODO: generalize to not only reach. Think about input/output dims for f and g
-    f = nn.Linear(M.state_space_dim['reach'][0], G.state_space_dim['reach'][0]) 
-    g = nn.Linear(M.state_space_dim['reach'][0], G.state_space_dim['reach'][0]) 
+    if map_type == 'linear':
+        f = nn.Linear(M.state_space_dim['reach'][0], G.state_space_dim['reach'][0]) 
+        g = nn.Linear(M.action_space_dim['reach'][0], G.action_space_dim['reach'][0]) 
+    if map_type == 'mlp':
+        # TODO
+        f = MLP()
+        g = MLP()
 
     f.to(device)
     g.to(device)
 
+    # hyperparameters
     learning_rate = 1e-3
-    f_optimizer = torch.optim.SGD(f.parameters(), lr=learning_rate)
-    g_optimizer = torch.optim.SGD(g.parameters(), lr=learning_rate)
-
-    num_epochs = 1
-
     num_batches = 10
     batch_size = 15
     num_examples = num_batches * batch_size
 
-    for epoch in range(num_epochs):
+    # optimizer (stochastic gradient descent)
+    f_optimizer = torch.optim.SGD(f.parameters(), lr=learning_rate)
+    g_optimizer = torch.optim.SGD(g.parameters(), lr=learning_rate)
+
+    # Set f and g to training mode
+    f.train()
+    g.train()
+
+    for epoch in range(epochs):
         cumulative_loss = 0
-        f.train()
-        g.train()
         M_training_data = DataLoader(RobotDataset(M), batch_size=batch_size)
         G_training_data = DataLoader(RobotDataset(G), batch_size=batch_size)
 
+        # Batch training
         for i, (M_data, G_data) in enumerate(zip(M_training_data, G_training_data)):
             ''' 
             TODO
              - [x] try getting action distribution from PPO
              - [x] finish batch sampling
              - [x] finish reward function
-             - [ ] test linear fitting
+             - [x] test linear fitting - loss barely decreases... (1/2)
              - [ ] try neural network fitting
              
              lower priority
              - [ ] seperate script to generate dataset rather than generating dataset on the fly
              - (faster way to generate dataset ^)
             '''
-
-            # print('M data transposed shape', torch.transpose(M_data, 0, 1).size())
             M_data.to(device)
             G_data.to(device)
 
+            # Relaxed bisimulation loss
             loss_fn = rlxBisimLoss
             loss = loss_fn(f, 
                            g, 
@@ -76,6 +101,7 @@ def learn_linear_maps(M, G):
                            mdp_2=G, 
                            samples_1=M_data, 
                            samples_2=G_data,
+                           device=device,
                     )
             # Remember optimizing for f and g
 
@@ -88,22 +114,52 @@ def learn_linear_maps(M, G):
             g_optimizer.step()
 
             cumulative_loss += loss.item()
+        
         print("Epoch %s, loss: %s" % (epoch, cumulative_loss / num_examples))
+        writer.add_scalar("Loss/train", cumulative_loss / num_examples, epoch)
 
-        # evaluation
-        # f.eval()
-        # g.eval()
+    # Save models
+    torch.save({
+                'epoch': epochs,
+                'model_state_dict': f.state_dict(),
+                'optimizer_state_dict': f_optimizer.state_dict(),
+               }, os.path.join(save_path, 'f.pt'))
     
+    torch.save({
+                'epoch': epochs,
+                'model_state_dict': g.state_dict(),
+                'optimizer_state_dict': g_optimizer.state_dict(),
+               }, os.path.join(save_path, 'g.pt'))
+    
+    # Log to tensorboard
+    writer.flush()
+    writer.close()
+
     return f, g
+
+def evaluate(f: torch.nn.Module, g: torch.nn.Module):
+    '''
+        TODO
+        :param f: trained map f: S_1 -> S_2
+        :param g: trained map g: A_1 -> A_2
+    '''
+    print(f'Evaluating f and g')
+    epsilon = 0
+    # Set maps to evaluation mode
+    f.eval()
+    g.eval()
+
+    return epsilon
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--input_env', type=str, required=True)
-    parser.add_argument('--output_env', type=str, required=True)
-    parser.add_argument('--input_policy', type=str, required=True)
-    parser.add_argument('--output_policy', type=str, required=True)
-    parser.add_argument('--input_dir', type=str, required=True) # input MDP dir
-    parser.add_argument('--output_dir', type=str, required=True) # output compositional structure dir
+    parser.add_argument('--input_env', type=str, required=True)     # input gym env name (e.g. CompLift-IIWA)
+    parser.add_argument('--output_env', type=str, required=True)    # output gym env name (e.g. CompLift-Panda)
+    parser.add_argument('--input_policy', type=str, required=True)  # input policy name (e.g. PPO)
+    parser.add_argument('--output_policy', type=str, required=True) # output policy name (e.g. PPO)
+    parser.add_argument('--input_dir', type=str, required=True)     # input MDP dir
+    parser.add_argument('--output_dir', type=str, required=True)    # output compositional structure dir
+    parser.add_argument('--epochs', type=int, default=100)          # num epochs for map training
 
     args = parser.parse_args()
 
@@ -122,6 +178,6 @@ if __name__ == '__main__':
                      prefix='best_model',
                 )
 
-    f, g = learn_linear_maps(input_mdp, output_mdp)
+    f, g = learn_maps(input_mdp, output_mdp, map_type='linear', epochs=args.epochs)
 
-    print(f)
+    epsilon = evaluate(f,g)

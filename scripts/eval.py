@@ -11,7 +11,7 @@ from stable_baselines3 import SAC
 from utils.util import *
 from utils.wrapper import MDP
 
-def rollout(env, agents, baseline_mode, eps=1, tasks=None, render=True):
+def rollout(env, agents, baseline_mode, eps=1, tasks=None, verbose=True, render=True):
     assert all([task in env.unwrapped.tasks for task in tasks]), \
         f'Invalid tasks {tasks} for {env} environment'
     env.unwrapped.tasks = tasks # TODO: check that order is preserved 
@@ -30,11 +30,11 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, render=True):
         if done:
             stats[f'rollout_{e}'] = {}
             if info['task_success']: 
-                print("Episode success")
+                if verbose: print("Episode success")
                 stats[f'rollout_{e}']['is_success'] = 1
                 success += 1
             else:
-                print('Episode failed')
+                if verbose: print('Episode failed')
                 print(f'Subtask {env.unwrapped.current_task} success:', info['is_success'])
                 stats[f'rollout_{e}']['is_success'] = 0
             
@@ -99,10 +99,10 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, render=True):
     env.close()
     return stats
 
-def rollout_mdp(M, eps=1, render=True):
+def rollout_mdp(M, eps=1, verbose=True, render=True):
     ''' rollout using MDP wrapper '''
     assert isinstance(M, MDP)
-    stats = rollout(M.env, M.agent, M.baseline, eps=eps, tasks=M.tasks, render=render)
+    stats = rollout(M.env, M.agent, M.baseline, eps=eps, tasks=M.tasks, verbose=verbose, render=render)
     return stats
 
 if __name__ == '__main__':

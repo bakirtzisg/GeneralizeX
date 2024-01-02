@@ -5,12 +5,11 @@ import numpy as np
 from geomloss import SamplesLoss
 
 from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
 
 from eval import rollout_mdp
 from genx.environments.lift import CompLiftEnv
 from .util import get_PPO_prob_dist
-
-device = torch.device('cuda:0')
 
 class RobotDataset(Dataset):
     '''
@@ -22,7 +21,7 @@ class RobotDataset(Dataset):
 
         task_success = 0
         while task_success == 0:
-            stats = rollout_mdp(mdp, eps=1, render=False)
+            stats = rollout_mdp(mdp, eps=1, verbose=False, render=False)
             task_success = stats['rollout_0']['is_success']
         # TODO: add 'time' to stats['rollout_0']['data']?
         self.sample = torch.tensor(stats['rollout_0']['data'], dtype=torch.float32, requires_grad=True)
@@ -33,7 +32,7 @@ class RobotDataset(Dataset):
     def __getitem__(self, idx):
         return self.sample[:,idx]
 
-def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, samples_2):
+def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, samples_2, device=torch.device('cuda:0')):
     '''
         Relaxed bisimulation loss 
         - 2-norm for rewards
@@ -49,6 +48,7 @@ def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, samples_2):
     assert len(samples_1) == len(samples_2), "Lengths of training data should be the same!"
     losses = torch.empty(len(samples_1), dtype=torch.float32)
 
+
     for i in range(len(samples_1)):
         # The first six columns of samples (stats['rollout_0']['data']) is the subtask observations
         # The next four columns of samples is the action vector (see _process_action in genx/environments/lift.py)
@@ -57,7 +57,6 @@ def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, samples_2):
         state_2 = samples_2[:,0:6]
         
         # Save the means and standard deviations of the action distributions for each sampled subtask obs
-        # TODO: g^* action_dists_1 !!! what is g^*? mapping for mean and std???
         action_dists_1 = [
             get_PPO_prob_dist(mdp_1.agent[mdp_1.tasks[0]], obs.detach().numpy()) \
             for obs in state_1
@@ -78,16 +77,16 @@ def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, samples_2):
                 task_reward = 2
             return task_reward
         
-        rewards_1 = samples_1[:,-1]
+        rewards_1 = samples_1[:,-1].to(device)
         # rewards_2 = samples_2[:,-1]
         rewards_2 = torch.tensor(
             [reach_rwd_function(f(obs.cuda())) for obs in state_1], 
-            requires_grad=True
+            requires_grad=True,
+            device=device,
         )
 
-        rwd_dif = torch.linalg.vector_norm(rewards_1-rewards_2)
+        rwd_dif = torch.sub(rewards_1, rewards_2)
 
-        # TODO: wasserstein dist for normal distributions?
         # Estimating 1-Wasserstein distance using debiased sinkhorn divergences (see geomloss)
         was_1_dist = SamplesLoss("sinkhorn", p=1)
         # TODO: was_2_dist = https://en.wikipedia.org/wiki/Wasserstein_metric#Normal_distributions
@@ -97,24 +96,33 @@ def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, samples_2):
         # )
         num_samples = 100 # TODO: change to at least 16 * max variance for confidence interval of 95%
 
-        action_samples_1 = torch.empty((len(action_dists_1), num_samples, 3))
+        action_samples_1 = torch.empty((len(action_dists_1), num_samples, 3), device=device)
         for j, distribution in enumerate(action_dists_1):
             samples = distribution.rsample((num_samples,))
             action_samples_1[j] = torch.squeeze(samples)
 
-        action_samples_2 = torch.empty((len(action_dists_2), num_samples, 3))
+        action_samples_2 = torch.empty((len(action_dists_2), num_samples, 3), device=device)
         for j, distribution in enumerate(action_dists_2):
             samples = distribution.rsample((num_samples,))
             action_samples_2[j] = torch.squeeze(samples)
 
-        action_samples_1.cuda()
-        action_samples_2.cuda()
+        was_1_dif = was_1_dist(g(action_samples_1), action_samples_2)
 
-        # TODO: should this be mean?? was_1_dif returns a 15D == len(samples_1) vector
-        was_1_dif = torch.mean(was_1_dist(action_samples_1, action_samples_2))
-        # losses = -(rwd_dif + was_dist(g_star(action_dists_1(s)), action_dists_2(g(s))))
+        # normalize the two loss components
+        torch.nn.functional.normalize(rwd_dif, p=2.0, dim=0)
+        torch.nn.functional.normalize(was_1_dif, p=2.0, dim=0)
 
-        # TODO: this is not complete. still missing the pushforward on action_samples_1
-        losses[i] = -(rwd_dif + was_1_dif)
+        loss = torch.add(rwd_dif, was_1_dif)
+
+        # Take maximum over sampled states
+        losses[i] = torch.max(loss)
     
     return torch.mean(losses)
+
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.Sequential()
+
+    def forward(self, x):
+        return self.layers(x)
