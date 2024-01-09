@@ -8,7 +8,7 @@
     Output
     - (f,g,epsilon)
 
-    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models --epochs=200 --type=linear
+    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models --epochs=1000 --type=linear
 
 '''
 import os
@@ -25,13 +25,15 @@ from argparse import ArgumentParser
 from utils.torch_utils import rlxBisimLoss
 
 from utils.wrapper import MDP
-from utils.torch_utils import RobotDataset, MLP
+from utils.torch_utils import RobotDataset, RobotDatasetLive, MLP
 
 # torch device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def learn_maps(M: MDP, G: MDP, map_type: str = 'linear', epochs: int = 100, maps_dir=None):
+def learn_maps(M: MDP, G: MDP, data_path=None, map_type: str = 'linear', epochs: int = 100, maps_dir=None):
     '''
+        Learn maps (f: S -> S', g: A -> A') to test domain-agnostic generalization
+
         :param M: input MDP
         :param G: output MDP
         :param map_type: specify map parameterization (e.g. linear, mlp)
@@ -99,15 +101,13 @@ def learn_maps(M: MDP, G: MDP, map_type: str = 'linear', epochs: int = 100, maps
     # TODO: optimize together (multi-objective optimization) or separately?
     for epoch in range(epochs):
         cumulative_loss = 0
-        M_training_data = DataLoader(RobotDataset(M), batch_size=batch_size, shuffle=True)
-
+        if data_path is None:
+            # Collect data live
+            M_training_data = DataLoader(RobotDatasetLive(M), batch_size=batch_size, shuffle=True)
+        else:
+            M_training_data = DataLoader(RobotDataset(M, data_path), batch_size=batch_size, shuffle=True)
         # Batch training
         for M_data in M_training_data:
-            ''' 
-            TODO
-             - [ ] seperate script to generate dataset rather than generating dataset on the fly
-             - (faster way to generate dataset ^)
-            '''
             f_optimizer.zero_grad()
             g_optimizer.zero_grad()
 
@@ -242,34 +242,41 @@ def test_maps(M: MDP, G: MDP, f, g):
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--input_env', type=str, required=True)     # input gym env name (e.g. CompLift-IIWA)
-    parser.add_argument('--output_env', type=str, required=True)    # output gym env name (e.g. CompLift-Panda)
-    parser.add_argument('--input_policy', type=str, required=True)  # input policy name (e.g. PPO)
-    parser.add_argument('--output_policy', type=str, required=True) # output policy name (e.g. PPO)
-    parser.add_argument('--input_dir', type=str, required=True)     # input MDP dir
-    parser.add_argument('--output_dir', type=str, required=True)    # output compositional structure dir
-    parser.add_argument('--epochs', type=int, default=100)          # num epochs for map training
-    parser.add_argument('--type', type=str, required=True)          # map parameterization for (f,g)
-    parser.add_argument('--maps_dir', type=str)
+    parser.add_argument('--input_env', type=str, required=True)                 # input gym env name (e.g. CompLift-IIWA)
+    parser.add_argument('--output_env', type=str, required=True)                # output gym env name (e.g. CompLift-Panda)
+    parser.add_argument('--input_policy', type=str, required=True)              # input policy name (e.g. PPO)
+    parser.add_argument('--output_policy', type=str, required=True)             # output policy name (e.g. PPO)
+    parser.add_argument('--input_tasks', type=str, nargs='*', required=True)    # input tasks
+    parser.add_argument('--output_tasks', type=str, nargs='*', required=True)   # output tasks
+    parser.add_argument('--input_dir', type=str, required=True)                 # input MDP dir
+    parser.add_argument('--output_dir', type=str, required=True)                # output compositional structure dir
+    parser.add_argument('--epochs', type=int, default=100)                      # num epochs for map training
+    parser.add_argument('--type', type=str, required=True)                      # map parameterization for (f,g)
+    parser.add_argument('--data_path', type=str)                                # dataset path
+    parser.add_argument('--maps_dir', type=str)                                 # directory to save trained maps
     args = parser.parse_args()
 
-    # should have f,g for each subtask (mdp)
+    # should have f,g for each subtask (mdp)?
     input_mdp = MDP(env=args.input_env, 
                     dir=args.input_dir, 
                     policy=args.input_policy,
-                    tasks=['reach'],
+                    tasks=args.input_tasks,
+                    baseline_mode=('baseline' in args.input_env.lower()),
                     prefix='best_model',
                 )
     output_mdp = MDP(env=args.output_env, 
                      dir=args.output_dir, 
                      policy=args.output_policy,
-                     tasks=['reach'],
-                    #  tasks=['reach','grasp'],
+                     tasks=args.output_tasks,
+                     baseline_mode=('baseline' in args.output_env.lower()),
                      prefix='best_model',
                 )
+   
+    data_path = args.data_path if args.data_path is not None else None
 
     f, g = learn_maps(input_mdp, 
                       output_mdp, 
+                      data_path=data_path,
                       map_type=args.type, 
                       epochs=args.epochs, 
                       maps_dir=args.maps_dir)

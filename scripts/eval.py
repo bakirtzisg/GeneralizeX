@@ -1,6 +1,7 @@
 import os
 import glob
 import genx
+import sys
 
 import numpy as np
 import gymnasium as gym 
@@ -11,7 +12,7 @@ from stable_baselines3 import SAC
 from utils.util import *
 from utils.wrapper import MDP
 
-def rollout(env, agents, baseline_mode, eps=1, tasks=None, verbose=True, render=True):
+def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=False, verbose=True, render=True):
     assert all([task in env.unwrapped.tasks for task in tasks]), \
         f'Invalid tasks {tasks} for {env} environment'
     env.unwrapped.tasks = tasks # TODO: check that order is preserved 
@@ -20,41 +21,51 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, verbose=True, render=
     done = False
     e = 0
     success = 0
-    subtask_obs_buffer = []
+    subtask_obs_buffer = {f'{task}': [] for task in tasks}
     q_buffer = []
     action_buffer = []
     reward_buffer = []
     env.reset()
 
-    while e < eps:
+    counter = 0
+    while counter < eps:
         if done:
-            stats[f'rollout_{e}'] = {}
+            stats[f'rollout_{counter}'] = {}
             if info['task_success']: 
-                if verbose: print("Episode success")
-                stats[f'rollout_{e}']['is_success'] = 1
+                print(f'Episode {e} success', end='\r')
+                stats[f'rollout_{counter}']['is_success'] = 1
                 success += 1
+
+                # Log data if successful rollout
+                stats[f'rollout_{counter}']['obs'] = np.array(q_buffer)
+                stats[f'rollout_{counter}']['subtask_obs'] = subtask_obs_buffer
+                stats[f'rollout_{counter}']['action'] = np.array(action_buffer)
+                stats[f'rollout_{counter}']['reward'] = np.array(reward_buffer)
+                # data = concatenate the obs, actions, and rewards by timestep
+                # np.shape = ((obs,action,reward),timesteps)
+                if baseline_mode:
+                    # all observations are the same shape
+                    task_obs = np.concatenate(([subtask_obs_buffer[f'{task}'] for task in tasks]))
+                    stats[f'rollout_{counter}']['data'] = np.vstack((np.array(task_obs).T,
+                                                            np.array(action_buffer).T,
+                                                            np.array(reward_buffer).T))
+                else:
+                    # observation shape depends on subtask
+                    
+                    stats[f'rollout_{counter}']['data'] = {
+                        f'{task}': np.vstack((np.array(subtask_obs_buffer[f'{task}']).T,
+                                            np.array(action_buffer).T,
+                                            np.array(reward_buffer).T)) 
+                                            for task in tasks}  
             else:
-                if verbose: print('Episode failed')
-                print(f'Subtask {env.unwrapped.current_task} success:', info['is_success'])
-                stats[f'rollout_{e}']['is_success'] = 0
+                if verbose: print(f'Subtask {env.unwrapped.current_task} success:', info['is_success'])
             
-            stats[f'rollout_{e}']['obs'] = np.array(q_buffer)
-            stats[f'rollout_{e}']['subtask_obs'] = np.array(subtask_obs_buffer)
-            stats[f'rollout_{e}']['action'] = np.array(action_buffer)
-            stats[f'rollout_{e}']['reward'] = np.array(reward_buffer)
-            
-            # data = concatenate the obs, actions, and rewards by timestep
-            # np.shape = ((obs,action,reward),timesteps)
-            stats[f'rollout_{e}']['data'] = np.vstack((np.array(subtask_obs_buffer).T,
-                                                       np.array(action_buffer).T,
-                                                       np.array(reward_buffer).T,
-                                                     ))     
             # reset buffers
             q_buffer = []
-            subtask_obs_buffer = []
+            subtask_obs_buffer = {f'{task}': [] for task in tasks}
             action_buffer = []
             reward_buffer = []
-
+            # Reset environment and task
             env.unwrapped.fresh_reset = True
             obs, info = env.reset()
             if len(tasks) == 1: env.unwrapped.current_task = tasks[0]
@@ -87,22 +98,24 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, verbose=True, render=
         q = np.arctan2(q_sin, q_cos)
 
         q_buffer.append(q) 
-        subtask_obs_buffer.append(info['current_task_obs'])
+        subtask_obs_buffer[f'{env.unwrapped.current_task}'].append(info['current_task_obs'])
         action_buffer.append(info['current_task_action'])
         reward_buffer.append(reward)
 
         if render:
             env.render()
-
+        # required_success determines whether to only count successful runs
+        counter = success if required_success else e
+        
     stats['success_rate'] = (success / eps) * 100
 
     env.close()
     return stats
 
-def rollout_mdp(M, eps=1, verbose=True, render=True):
+def rollout_mdp(M, eps=1, required_success=False, verbose=True, render=True):
     ''' rollout using MDP wrapper '''
     assert isinstance(M, MDP)
-    stats = rollout(M.env, M.agent, M.baseline, eps=eps, tasks=M.tasks, verbose=verbose, render=render)
+    stats = rollout(M.env, M.agent, M.baseline, eps=eps, tasks=M.tasks, required_success=required_success, verbose=verbose, render=render)
     return stats
 
 if __name__ == '__main__':
@@ -128,9 +141,4 @@ if __name__ == '__main__':
 
     # Evaluate
     info = rollout_mdp(M, eps=args.eps)
-    print(info['rollout_0']['obs'])
-    # print(info['rollout_0']['action'])
-    # print(info['rollout_0']['reward'])
-    # print(np.shape(info['rollout_0']['data']))
-    # print(get_PPO_prob_dist(M.agent['reach'], info['rollout_0']['subtask_obs'][0]))
     print(f'Success rate: {info["success_rate"]}')

@@ -9,11 +9,11 @@ from gymnasium.envs.registration import register
 # from scripts.utils.wrapper import MDP
 
 class CompLiftEnv(gym.Env):
-    def __init__(self, robot="Panda", baseline_mode=False, training_mode=False, verbose=True):
+    def __init__(self, robot="Panda", baseline_mode=False, training_mode=False, verbose=True, normalize_reward=False):
         self._controller_config = load_controller_config(default_controller='OSC_POSITION')
         self._robot = robot
         self._verbose = verbose
-
+        self._normalize_reward = normalize_reward
         # Subtasks to complete the lift task (in order)
         self.tasks = ['reach', 'grasp', 'lift']
         
@@ -30,6 +30,7 @@ class CompLiftEnv(gym.Env):
             use_camera_obs=False,
             control_freq=10,
             horizon=100,
+            # reward_scale=1 if self._normalize_reward else None,
         )
         
         # The initial joint configuration of the robot depends on the subtask
@@ -197,21 +198,24 @@ class CompLiftEnv(gym.Env):
             
             elif self.current_task == 'grasp':
                 # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['grasp_dist'])
-                task_reward = 0
+                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['reach_dist'])
                 if self._env._check_grasp(gripper=self._env.robots[0].gripper, object_geoms=self._env.cube):
                     task_completed = True
                     task_reward += 0.25
             
             elif self.current_task == 'lift':
-                # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['lift_dist'])
-                task_reward = 0
+                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['lift_dist'])
+                # task_reward = 0
                 if new_reward_criteria['cube_height'] > new_reward_criteria['lift_height']: 
                     # task is completed when cube is lifted
                     task_completed = True
-                    task_reward = 2
+                    task_reward = 2.25
 
             else:
                 raise RuntimeError('Invalid subtask')
+        
+        if self._normalize_reward: 
+            reward /= 2.25
         
         self.reward_criteria = new_reward_criteria
         return task_reward, task_completed, task_failed
@@ -257,7 +261,7 @@ class CompLiftEnv(gym.Env):
 
         # If completed current subtask, save the final q_pos to later set as init q_pos for next subtask
         # Skip when current task is last subtask
-        if self.current_task != self.tasks[-1]:
+        if self.current_task != self.tasks[-1] and not self.baseline_mode:
             next_task = self.tasks[self.tasks.index(self.current_task) + 1]
             if task_completed:
                 # Continuously update robot initial qpos for next subtask (this is inefficient...)
@@ -283,7 +287,12 @@ class CompLiftEnv(gym.Env):
             # mdp = MDP()
             # data = rollout(mdp)
             # self._robot_init_qpos = data['rollout_0']['obs'][-1]
-        return self._robot_init_qpos[self.current_task]
+        if self.baseline_mode:
+            init_qpos = self._robot_init_qpos[self.tasks[0]]
+        else:
+            init_qpos = self._robot_init_qpos[self.current_task]
+
+        return init_qpos
 
     def reset(self, seed=None, options=None):
         if self.setup_skip_reset_once:
@@ -324,13 +333,13 @@ def register_envs():
         id="CompLift-Panda",
         entry_point=CompLiftEnv,
         max_episode_steps=50,
-        kwargs={'verbose': False}
+        kwargs={'robot': 'Panda', 'verbose': False}
     )
     register(
         id="BaselineLift-Panda",
         entry_point=CompLiftEnv,
         max_episode_steps=50,
-        kwargs={'baseline_mode': True}
+        kwargs={'robot': 'Panda', 'baseline_mode': True, 'verbose': False}
     )
     register(
         id="CompLift-IIWA",
@@ -342,17 +351,17 @@ def register_envs():
         id="BaselineLift-IIWA",
         entry_point=CompLiftEnv,
         max_episode_steps=50,
-        kwargs={'robot': 'IIWA', 'baseline_mode': True}
+        kwargs={'robot': 'IIWA', 'baseline_mode': True, 'verbose': False}
     )
     register(
         id="CompLift-Kinova3",
         entry_point=CompLiftEnv,
         max_episode_steps=50,
-        kwargs={'robot': 'Kinova3'}
+        kwargs={'robot': 'Kinova3', 'verbose': False}
     )
     register(
         id="BaselineLift-Kinova3",
         entry_point=CompLiftEnv,
         max_episode_steps=50,
-        kwargs={'robot': 'Kinova3', 'baseline_mode': True}
+        kwargs={'robot': 'Kinova3', 'baseline_mode': True, 'verbose': False}
     )

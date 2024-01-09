@@ -6,6 +6,7 @@ import numpy as np
 
 from time import strftime
 from argparse import ArgumentParser
+from collections.abc import Sequence
 
 from stable_baselines3 import SAC, PPO
 from stable_baselines3.common.monitor import Monitor
@@ -18,14 +19,13 @@ def train(args):
     # Training parameters
     ENV_NAME = args.env
     POLICY = args.policy
-    SUCCESS_THRESHOLD = args.success_thres
     DISCOUNT_RATE = args.gamma
     TRAINING_STEPS = args.epochs
     EVAL_FREQUENCY = args.eval_freq
     EVAL_EPISODES = args.eval_ep
     SAVE_FREQUENCY = args.save_freq
     RESUME_TRAINING = args.resume_training
-    BASELINE_MODE = args.baseline
+    BASELINE_MODE = 'baseline' in ENV_NAME.lower()
     SKIP_TASKS = args.skip_tasks
     
     if BASELINE_MODE:
@@ -48,6 +48,16 @@ def train(args):
     
     agents = {} 
     tasks = ['baseline'] if BASELINE_MODE else env.unwrapped.tasks
+
+    if isinstance(args.success_thres, float):
+        # if a scalar then set success threshold to be constant among all tasks
+        SUCCESS_THRESHOLD = args.success_thres * np.ones(len(tasks))
+    elif isinstance(args.success_rate, Sequence) and len(args.success_thres) == len(tasks):
+        # set individual success thresholds for each task
+        SUCCESS_THRESHOLD = args.success_thres
+    else:
+        raise RuntimeError("Invalid success threshold flag")
+
     for task in SKIP_TASKS:
         tasks.remove(task)
     # Initialize SAC policy for all tasks
@@ -55,7 +65,10 @@ def train(args):
         env.unwrapped.current_task = task
         if RESUME_TRAINING:
             # Pattern-match task policy path
-            TASK_MODEL_PATH = find_file(MODEL_PATH, prefix=f'{task}/best_model.zip')
+            if MODEL_PREFIX is None:
+                TASK_MODEL_PATH = find_file(MODEL_PATH, prefix=f'{task}/best_model.zip')
+            else:
+                TASK_MODEL_PATH = find_file(MODEL_PATH, prefix=MODEL_PREFIX)
             # Load previously trained task policy
             if POLICY == 'SAC':
                 agents[task] = SAC.load(TASK_MODEL_PATH,                      
@@ -87,7 +100,7 @@ def train(args):
     eval_env.unwrapped.training_mode = True
     
     # Train subtask policies sequentially
-    for task, agent in agents.items():
+    for i, (task, agent) in enumerate(agents.items()):
         # Setup current task of environment
         if not BASELINE_MODE:
             env.unwrapped.current_task = task
@@ -101,7 +114,7 @@ def train(args):
         # print(f'training_mode = {env.unwrapped.training_mode}')
 
         # Stop training on success rate threshold callback
-        stop_training_callback = StopTrainingOnSuccessRateThreshold(success_threshold=SUCCESS_THRESHOLD, verbose=1)
+        stop_training_callback = StopTrainingOnSuccessRateThreshold(success_threshold=SUCCESS_THRESHOLD[i], verbose=1)
 
         # Evaluation callback
         eval_callback = EvalCallback(eval_env, 
@@ -140,11 +153,10 @@ if __name__ == '__main__':
     parser.add_argument('--dir', type=str, default='')
     parser.add_argument('--policy', type=str, default='SAC')
     parser.add_argument('--model_prefix', type=str, default='')
-    parser.add_argument('--baseline', action='store_true')
     parser.add_argument('--resume_training', action='store_true')
     parser.add_argument('--skip_tasks', type=str, nargs='*', default=[])
     # Training parameters
-    parser.add_argument('--success_thres', type=float, default=0.95)
+    parser.add_argument('--success_thres', type=float, nargs='*', default=0.95)
     parser.add_argument('--gamma', type=float, default=0.96)
     parser.add_argument('--epochs', type=int, default=int(2.5e5))
     parser.add_argument('--eval_freq', type=int, default=int(1e4))

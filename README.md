@@ -13,7 +13,7 @@ python $PWD/env/lib/python3.9/site-packages/robosuite/scripts/setup_macros.py
 
 ## Run
 ### Compositional RL Training
-There is the option to either train the baseline policy or the compositional policy. To train the baseline policy, run with the flag `--baseline`.
+There is the option to either train the baseline or compositional reinforcement learning policy. 
 ```
 python scripts/train.py
 ```
@@ -22,7 +22,6 @@ Flags (see `scripts\train.py` for more flags)
 - `--env`: name of gymnasium environment
 - `--dir`: directory for saved models (When resuming training, this is the directory with your trained models).
 - `--model_prefix`: optional prefix for saved models
-- `--baseline`: flag to train baseline policy. If this flag is not provided then by default train the compositional policy.
 - `--resume_training`: flag to load trained models and continue training. If this flag is not provided then by default start training a new policy.
 
 Example: train baseline lift policy (IIWA arm)

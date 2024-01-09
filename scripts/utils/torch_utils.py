@@ -4,16 +4,16 @@ import numpy as np
 
 from geomloss import SamplesLoss
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import torch.nn as nn
 
 from eval import rollout_mdp
-from genx.environments.lift import CompLiftEnv
-from .util import get_PPO_prob_dist
+from utils.util import get_PPO_prob_dist
+from utils.wrapper import MDP
 
-class RobotDataset(Dataset):
+class RobotDatasetLive(Dataset):
     '''
-        Dataset collected from policy rollouts (wrapped as a torch.utils.data.Dataset)
+        Dataset collected from policy rollouts performed live (wrapped as a torch.utils.data.Dataset)
     '''
     def __init__(self, mdp):
         # Sample rollout info from MDP policy (PPO)
@@ -23,12 +23,31 @@ class RobotDataset(Dataset):
         while task_success == 0:
             stats = rollout_mdp(mdp, eps=1, verbose=False, render=False)
             task_success = stats['rollout_0']['is_success']
-        # TODO: add 'time' to stats['rollout_0']['data']?
-        self.sample = torch.tensor(stats['rollout_0']['data'], dtype=torch.float32, requires_grad=True)
+        task = mdp.env.unwrapped.current_task
+        self.sample = torch.tensor(stats['rollout_0']['data'][f'{task}'], dtype=torch.float32, requires_grad=True)
 
     def __len__(self):
         return self.sample.size()[1]
     
+    def __getitem__(self, idx):
+        return self.sample[:,idx]
+    
+class RobotDataset(Dataset):
+    def __init__(self, mdp: MDP, file: str):
+        self.policy = mdp
+        self.data = np.load(file, allow_pickle=True).item()
+        self.rollout_idx = np.random.randint(0, len(self.data.keys())-1)
+        task = self.policy.env.unwrapped.current_task
+
+        if self.policy.baseline:
+            self.sample = torch.tensor(self.data[f'rollout_{self.rollout_idx}']['data'], dtype=torch.float32, requires_grad=True)
+        else:
+            self.sample = torch.tensor(
+                self.data[f'rollout_{self.rollout_idx}']['data'][f'{task}'], dtype=torch.float32, requires_grad=True)
+    
+    def __len__(self):
+        return self.sample.size()[1]
+
     def __getitem__(self, idx):
         return self.sample[:,idx]
 
@@ -65,17 +84,24 @@ def rlxBisimLoss(f, g, mdp_1, mdp_2, samples_1, device=torch.device('cuda:0')):
         # TODO: rewrite reward function with param state and world state? 
         # (obtainable from state_1 since it is subtask observation)
         # rwd_function = CompLiftEnv._evaluate_task() 
-        def reach_rwd_function(obs):
-            # TODO: move somewhere else? preferably into genx lift environment (changed from np to torch)
-            reach_dist = torch.linalg.vector_norm(obs[3:] - obs[:3])
-            task_reward = 1 - torch.tanh(10.0 * reach_dist)
-            if reach_dist < 0.01:
-                task_reward = 2
+        def lift_rwd_function(obs, subtask):
+            if subtask == 'reach':
+                # TODO: move somewhere else? preferably into genx lift environment (changed from np to torch)
+                reach_dist = torch.linalg.vector_norm(obs[3:] - obs[:3])
+                task_reward = 1 - torch.tanh(10.0 * reach_dist)
+                if reach_dist < 0.01:
+                    task_reward = 2
+            elif subtask == 'grasp':
+                raise NotImplementedError
+            elif subtask == 'lift':
+                raise NotImplementedError
+            else:
+                raise RuntimeError("Invalid subtask for compositional lift environment")
             return task_reward
         
         rewards_1 = samples_1[:,-1].to(device)
         rewards_2 = torch.tensor(
-            [reach_rwd_function(f(obs.cuda())) for obs in state_1], 
+            [lift_rwd_function(f(obs.cuda()), mdp_1.tasks[0]) for obs in state_1], 
             requires_grad=True,
             device=device,
         )
