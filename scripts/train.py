@@ -52,7 +52,7 @@ def train(args):
     if isinstance(args.success_thres, float):
         # if a scalar then set success threshold to be constant among all tasks
         SUCCESS_THRESHOLD = args.success_thres * np.ones(len(tasks))
-    elif isinstance(args.success_rate, Sequence) and len(args.success_thres) == len(tasks):
+    elif isinstance(args.success_thres, Sequence) and len(args.success_thres) == len(tasks):
         # set individual success thresholds for each task
         SUCCESS_THRESHOLD = args.success_thres
     else:

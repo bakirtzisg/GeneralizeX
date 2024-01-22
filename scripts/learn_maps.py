@@ -8,29 +8,34 @@
     Output
     - (f,g,epsilon)
 
-    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models --epochs=1000 --type=linear
+    CompLift-IIWA to CompLift-Panda:
+    python scripts/learn_maps.py --input_env=CompLift-IIWA --input_policy=PPO --input_dir=experiments/PPO/CompLift-IIWA/20231219-145654-id-7627/models --input_tasks reach --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20231222-172458-id-1179/models --output_tasks reach --epochs=1000 --type=linear
 
+    BaselineLift-Panda to CompLift-Panda:
+    python scripts/learn_maps.py --input_env=BaselineLift-Panda --input_policy=PPO --input_dir=experiments/PPO/BaselineLift-Panda/20240108-084034-id-8993/models --input_tasks all --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20240111-104724-id-1351/models --output_tasks all --epochs=10 --type=mlp --train_data_path=results/maps/datasets/BaselineLift-Panda_PPO_1000_20240122-113005_rollouts.npy
 '''
 import os
-from time import strftime
 
 import numpy as np
+
+from time import strftime
+from argparse import ArgumentParser
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from argparse import ArgumentParser
-from utils.torch_utils import rlxBisimLoss
-
-from utils.wrapper import MDP
-from utils.torch_utils import RobotDataset, RobotDatasetLive, MLP
+from utils.wrapper import MDP, MapsWrapper
+from utils.loss_function import rlxBisimLoss
+from utils.dataset_wrappers import RobotDataset, RobotDatasetLive
 
 # torch device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def learn_maps(M: MDP, G: MDP, data_path=None, map_type: str = 'linear', epochs: int = 100, maps_dir=None):
+def learn_maps(M: MDP, G: MDP, 
+               data_path=None, map_type: str = 'linear', 
+               epochs: int = 100, maps_dir=None) -> MapsWrapper:
     '''
         Learn maps (f: S -> S', g: A -> A') to test domain-agnostic generalization
 
@@ -41,119 +46,90 @@ def learn_maps(M: MDP, G: MDP, data_path=None, map_type: str = 'linear', epochs:
         :param maps_dir: directory of previously trained maps (f,g)
     '''
     # hyperparameters
-    learning_rate = 1e-3
-    batch_size = 15
+    opt_params = {'learning_rate': 1e-3}
+    batch_size = 1
 
-    # TODO: generalize to not only reach. Think about input/output dims for f and g
-    # when M transitions, G should too? (f,g) based on subtask? parameterize (f,g) with task (f,g,t)?
-    if map_type == 'linear':
-        f = nn.Linear(M.state_space_dim['reach'], G.state_space_dim['reach']) 
-        g = nn.Linear(M.action_space_dim['reach'], G.action_space_dim['reach']) 
-    elif map_type == 'mlp':
-        f = MLP(M.state_space_dim['reach'], G.state_space_dim['reach'])
-        g = MLP(M.action_space_dim['reach'], G.action_space_dim['reach'])
-
-    if maps_dir is not None:
-        save_path = maps_dir
-        print(f'--- Loading {map_type} maps ---')
-
-        f_checkpoint = torch.load(os.path.join(maps_dir, 'f.pt'))
-        g_checkpoint = torch.load(os.path.join(maps_dir, 'g.pt'))
-        f.load_state_dict(f_checkpoint['model_state_dict'])
-        g.load_state_dict(g_checkpoint['model_state_dict'])
-
-        # optimizer (stochastic gradient descent)
-        f_optimizer = torch.optim.SGD(f.parameters(), lr=learning_rate)
-        g_optimizer = torch.optim.SGD(g.parameters(), lr=learning_rate)
-        f_optimizer.load_state_dict(f_checkpoint['optimizer_state_dict'])
-        g_optimizer.load_state_dict(g_checkpoint['optimizer_state_dict'])
-
-        f_epoch = f_checkpoint['epoch']
-        g_epoch = g_checkpoint['epoch']
-        
-    else:
-        save_path = os.path.join(os.path.curdir, f'results/maps/{map_type}/{strftime("%Y%m%d-%H%M%S")}-id-{np.random.randint(10000)}')
-
-        print(f'--- Training {map_type} maps ---')
-
-        f_optimizer = torch.optim.SGD(f.parameters(), lr=learning_rate)
-        g_optimizer = torch.optim.SGD(g.parameters(), lr=learning_rate)
-
-        f_epoch = 0
-        g_epoch = 0
+    # training parameters
+    log_every_epochs = 10
     
-    # send f,g to device (GPU)
-    f.to(device)
-    g.to(device)
+
+    maps = MapsWrapper(M, G, map_type=map_type, maps_dir=maps_dir, opt_params=opt_params)
 
     # if skipping training
-    if epochs == 0: return f, g
+    if epochs == 0: return maps
     
     # setup tensorboard
-    log_path = os.path.join(save_path, 'log')
+    log_path = os.path.join(maps.save_path, 'log')
     if not os.path.exists(log_path): os.makedirs(log_path)
     writer = SummaryWriter(log_path)
 
-    # Set f and g to training mode
-    f.train()
-    g.train()
+    # Set f and g to training mode + send to device (GPU)
+    maps.train()
+    maps.to(device)
 
-    # TODO: optimize together (multi-objective optimization) or separately?
+    maps.step = {f'{task}': 0 for task in G.tasks}
     for epoch in range(epochs):
-        cumulative_loss = 0
+        cumulative_loss = {f'{task}': 0 for task in G.tasks}
         if data_path is None:
             # Collect data live
-            M_training_data = DataLoader(RobotDatasetLive(M), batch_size=batch_size, shuffle=True)
+            # M_training_data = DataLoader(RobotDatasetLive(M), batch_size=batch_size, shuffle=True)
+            M_training_data = DataLoader(RobotDatasetLive(M), batch_size=batch_size)
         else:
-            M_training_data = DataLoader(RobotDataset(M, data_path), batch_size=batch_size, shuffle=True)
+            M_training_data = DataLoader(RobotDataset(M, data_path), batch_size=batch_size)
         # Batch training
-        for M_data in M_training_data:
-            f_optimizer.zero_grad()
-            g_optimizer.zero_grad()
+        for M_data, M_task in M_training_data:
+            current_task = M_task[0]
+            f_subtask = maps.f[current_task]
+            g_subtask = maps.g[current_task]
 
+            f_subtask_optimizer = maps.f_optimizer[current_task]
+            g_subtask_optimizer = maps.g_optimizer[current_task]
+            # TODO: look at current state (with history?), 
+            #       decide which task is being performed, 
+            #       train corresponding (f,g) map
+            # TODO: train on entire trajectory (maybe with dropout), and use G to determine when to transition?
+            f_subtask_optimizer.zero_grad()
+            g_subtask_optimizer.zero_grad()
+            
             M_data.to(device)
 
             # Relaxed bisimulation loss
             loss_fn = rlxBisimLoss
-            loss = loss_fn(f, 
-                           g, 
+            loss = loss_fn(f_subtask, 
+                           g_subtask, 
                            mdp_1=M, 
-                           mdp_2=G, 
+                           mdp_2=G,
+                           task=current_task, 
                            samples_1=M_data, 
                            device=device,
                     )
 
             loss.backward()
             
-            f_optimizer.step()
-            g_optimizer.step()
+            f_subtask_optimizer.step()
+            g_subtask_optimizer.step()
 
-            cumulative_loss += loss.item()
+            cumulative_loss[current_task] += loss.item()
+            maps.step[current_task] += 1
+
+        step_loss = [v / (batch_size * len(M_training_data)) for v in cumulative_loss.values()]
+        print(f"Epoch {maps.f_epoch + epoch}, losses: {step_loss}")
         
-        print("Epoch %s, loss: %s" % (f_epoch + epoch, cumulative_loss / batch_size))
-        writer.add_scalar("Loss/train - f", cumulative_loss / batch_size, f_epoch + epoch)
-        writer.add_scalar("Loss/train - g", cumulative_loss / batch_size, g_epoch + epoch)
+        if epoch % log_every_epochs == 0 or epoch == epochs - 1:
+            for task in G.tasks:
+                writer.add_scalar(f"f loss/train - {task}", cumulative_loss[f'{task}'] / (batch_size * len(M_training_data)), maps.f_epoch + step[f'{task}'])
+                writer.add_scalar(f"g loss/train - {task}", cumulative_loss[f'{task}'] / (batch_size * len(M_training_data)), maps.g_epoch + step[f'{task}'])
 
     # Save models
-    torch.save({
-                'epoch': f_epoch + epochs,
-                'model_state_dict': f.state_dict(),
-                'optimizer_state_dict': f_optimizer.state_dict(),
-               }, os.path.join(save_path, 'f.pt'))
-    
-    torch.save({
-                'epoch': g_epoch + epochs,
-                'model_state_dict': g.state_dict(),
-                'optimizer_state_dict': g_optimizer.state_dict(),
-               }, os.path.join(save_path, 'g.pt'))
+    maps.save()
     
     # Log to tensorboard
     writer.flush()
     writer.close()
 
-    return f, g
+    return maps
 
-def evaluate(M: MDP, G: MDP, f, g):
+def evaluate(M: MDP, G: MDP, f, g, data_path: str = None):
     '''
         Evaluate maps f and g on evaluation set
 
@@ -166,14 +142,21 @@ def evaluate(M: MDP, G: MDP, f, g):
     losses = []
     epsilon = 0
 
+    # TODO: for single task - generalize to multi-task 
+    f = f[M.tasks[0]] if len(M.tasks) == len(G.tasks) == 1 else None
+    g = g[M.tasks[0]] if len(M.tasks) == len(G.tasks) == 1 else None
+
     # Set maps to evaluation mode
     f.eval()
     g.eval()
 
-    test_set = DataLoader(RobotDataset(M))
+    if data_path is None:
+        test_set = DataLoader(RobotDatasetLive(M))
+    else:
+        test_set = DataLoader(RobotDataset(M, data_path))
     
     with torch.no_grad():
-        for data in test_set:
+        for data, task in test_set:
             loss_fn = rlxBisimLoss
             loss = loss_fn(f=f,
                         g=g,
@@ -207,7 +190,7 @@ def test_maps(M: MDP, G: MDP, f, g):
     - when MDP2 is in (s_2), check when f(s_1) = s_2 and apply the corresponding action a_1 MDP1 will take at s_1 and apply g(a_1) to MDP2
     '''
 
-    M_data = DataLoader(RobotDataset(M), batch_size=M.horizon)
+    M_data = DataLoader(RobotDatasetLive(M), batch_size=M.horizon)
     # get states and actions
     # transform states and actions using (f,g)
 
@@ -252,7 +235,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, required=True)                # output compositional structure dir
     parser.add_argument('--epochs', type=int, default=100)                      # num epochs for map training
     parser.add_argument('--type', type=str, required=True)                      # map parameterization for (f,g)
-    parser.add_argument('--data_path', type=str)                                # dataset path
+    parser.add_argument('--train_data_path', type=str)                          # training dataset path
+    parser.add_argument('--eval_data_path', type=str)                           # evaluation dataset path
     parser.add_argument('--maps_dir', type=str)                                 # directory to save trained maps
     args = parser.parse_args()
 
@@ -272,13 +256,13 @@ if __name__ == '__main__':
                      prefix='best_model',
                 )
    
-    data_path = args.data_path if args.data_path is not None else None
+    train_data_path = args.train_data_path if args.train_data_path is not None else None
 
-    f, g = learn_maps(input_mdp, 
+    maps = learn_maps(input_mdp, 
                       output_mdp, 
-                      data_path=data_path,
+                      data_path=train_data_path,
                       map_type=args.type, 
                       epochs=args.epochs, 
                       maps_dir=args.maps_dir)
 
-    epsilon = evaluate(input_mdp, output_mdp, f, g)
+    # epsilon = evaluate(input_mdp, output_mdp, f, g, data_path=args.eval_data_path)

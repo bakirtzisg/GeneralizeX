@@ -22,9 +22,11 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=Fals
     e = 0
     success = 0
     subtask_obs_buffer = {f'{task}': [] for task in tasks}
+    subtask_buffer = []
     q_buffer = []
     action_buffer = []
     reward_buffer = []
+    reward_criteria_buffer = []
     env.reset()
 
     counter = 0
@@ -39,8 +41,10 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=Fals
                 # Log data if successful rollout
                 stats[f'rollout_{counter}']['obs'] = np.array(q_buffer)
                 stats[f'rollout_{counter}']['subtask_obs'] = subtask_obs_buffer
+                stats[f'rollout_{counter}']['subtask'] = subtask_buffer
                 stats[f'rollout_{counter}']['action'] = np.array(action_buffer)
                 stats[f'rollout_{counter}']['reward'] = np.array(reward_buffer)
+                stats[f'rollout_{counter}']['reward_criteria'] = np.array(reward_criteria_buffer)
                 # data = concatenate the obs, actions, and rewards by timestep
                 # np.shape = ((obs,action,reward),timesteps)
                 if baseline_mode:
@@ -51,20 +55,22 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=Fals
                                                             np.array(reward_buffer).T))
                 else:
                     # observation shape depends on subtask
-                    
                     stats[f'rollout_{counter}']['data'] = {
                         f'{task}': np.vstack((np.array(subtask_obs_buffer[f'{task}']).T,
-                                            np.array(action_buffer).T,
-                                            np.array(reward_buffer).T)) 
-                                            for task in tasks}  
+                                              np.array(action_buffer)[:np.shape(subtask_obs_buffer[f'{task}'])[0]].T,
+                                              np.array(reward_buffer)[:np.shape(subtask_obs_buffer[f'{task}'])[0]].T)) 
+                                              for task in tasks}  
             else:
                 if verbose: print(f'Subtask {env.unwrapped.current_task} success:', info['is_success'])
+                stats[f'rollout_{counter}']['is_success'] = 0
             
             # reset buffers
             q_buffer = []
             subtask_obs_buffer = {f'{task}': [] for task in tasks}
+            subtask_buffer = []
             action_buffer = []
             reward_buffer = []
+            reward_criteria_buffer = []
             # Reset environment and task
             env.unwrapped.fresh_reset = True
             obs, info = env.reset()
@@ -99,8 +105,10 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=Fals
 
         q_buffer.append(q) 
         subtask_obs_buffer[f'{env.unwrapped.current_task}'].append(info['current_task_obs'])
+        subtask_buffer.append(env.unwrapped.current_task)
         action_buffer.append(info['current_task_action'])
         reward_buffer.append(reward)
+        reward_criteria_buffer.append(info['reward_criteria'])
 
         if render:
             env.render()

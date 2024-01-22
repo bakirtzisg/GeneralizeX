@@ -128,8 +128,6 @@ class CompLiftEnv(gym.Env):
         elif self.current_task == 'lift':
             # Control eef z pos and gripper only
             action = np.concatenate([[0, 0], action])
-            # TODO: can control x,y too? (move)
-            # action = np.concatenate([action[:3], [1]])
 
         else:
             raise RuntimeError('Invalid task')
@@ -149,6 +147,7 @@ class CompLiftEnv(gym.Env):
         reach_dist = np.linalg.norm(cube_pos - hand_pos)
         grasp_dist = np.linalg.norm(np.concatenate([cube_pos[:2],[grasp_height]]) - cube_pos)
         lift_dist = np.linalg.norm(np.concatenate([cube_pos[:2],[lift_height]])-cube_pos)
+        check_grasp = self._env._check_grasp(gripper=self._env.robots[0].gripper, object_geoms=self._env.cube)
        
         criteria = {
             'reach_dist': reach_dist,
@@ -156,6 +155,7 @@ class CompLiftEnv(gym.Env):
             'grasp_dist': grasp_dist,
             'lift_dist': lift_dist,
             'lift_height': lift_height,
+            'check_grasp': check_grasp,
         }
         return criteria
 
@@ -198,14 +198,15 @@ class CompLiftEnv(gym.Env):
             
             elif self.current_task == 'grasp':
                 # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['grasp_dist'])
-                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['reach_dist'])
-                if self._env._check_grasp(gripper=self._env.robots[0].gripper, object_geoms=self._env.cube):
+                # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['reach_dist'])
+                task_reward = 0
+                if new_reward_criteria['check_grasp']:
                     task_completed = True
                     task_reward += 0.25
             
             elif self.current_task == 'lift':
-                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['lift_dist'])
-                # task_reward = 0
+                # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['lift_dist'])
+                task_reward = 0
                 if new_reward_criteria['cube_height'] > new_reward_criteria['lift_height']: 
                     # task is completed when cube is lifted
                     task_completed = True
@@ -225,21 +226,12 @@ class CompLiftEnv(gym.Env):
         task_action = self._process_action(action)
         observation, reward, done, info = self._env.step(task_action)
         task_reward, task_completed, task_failed = self._evaluate_task(observation)
-        obs = self._get_obs()
 
         terminated = done
         truncated = task_failed or terminated
 
-        # Log step statistics
-        info['current_task'] = self.current_task                # current task
-        info['task_truncated'] = truncated                      # step terminated
-        info['task_reward'] = task_reward                       # task reward
-        info['current_task_obs'] = obs                          # task observation
-        info['current_task_action'] = task_action               # task action
-        info['observation'] = observation                       # robosuite observation
-        info['action'] = action                                 # robosuite action
-        info['is_success'] = True if task_completed else False  # subtask success 
         info['task_success'] = False                            # entire task success
+
         # If baseline_mode, always reset current_task to first task (reach)
         if self.baseline_mode:
             self.fresh_reset = True
@@ -264,16 +256,28 @@ class CompLiftEnv(gym.Env):
         if self.current_task != self.tasks[-1] and not self.baseline_mode:
             next_task = self.tasks[self.tasks.index(self.current_task) + 1]
             if task_completed:
-                # Continuously update robot initial qpos for next subtask (this is inefficient...)
-                # TODO: initial qpos should depend on block location (which varies). Get block location from simulator?
-                # TODO: inverse kinematics to self._env.sim.data.body_xpos[self._env.cube_body_id] w/ gripper open?
-                # TODO: or run reach first???? this sounds better...
-                self._robot_init_qpos[next_task] = np.arctan2(
-                    observation['robot0_joint_pos_sin'],
-                    observation['robot0_joint_pos_cos'],
-                )
+                # Check if robot_init_qpos for next_task has been set. If not, set it to final qpos of previous task
+                if self._robot_init_qpos.get(next_task) is None:
+                    self._robot_init_qpos[next_task] = np.arctan2(
+                        observation['robot0_joint_pos_sin'],
+                        observation['robot0_joint_pos_cos'],
+                    )
                 # if self._verbose:
                 #     print(f"Setting initial joint configuration for subtask {self.current_task} to:", self._robot_init_qpos[self.current_task])
+        
+        # Get obs (this depends on self.current_task, which may be updated above)
+        obs = self._get_obs()
+
+        # Log step statistics
+        info['current_task'] = self.current_task                # current task
+        info['task_truncated'] = truncated                      # step terminated
+        info['task_reward'] = task_reward                       # task reward
+        info['current_task_obs'] = obs                          # task observation
+        info['current_task_action'] = task_action               # task action
+        info['reward_criteria'] = self.reward_criteria          # task reward criteria (used for rwd fn)
+        info['observation'] = observation                       # robosuite observation
+        info['action'] = action                                 # robosuite action
+        info['is_success'] = True if task_completed else False  # subtask success 
 
         return obs, task_reward, terminated, task_failed, info
 
@@ -281,17 +285,10 @@ class CompLiftEnv(gym.Env):
         self.setup_skip_reset_once = True
     
     def _reset_robot_init_qpos(self):
-        # TODO: rollout previous policies to set _robot_init_qpos???
-        # if (self.current_task != self.tasks[0]):
-            # run previous policies
-            # mdp = MDP()
-            # data = rollout(mdp)
-            # self._robot_init_qpos = data['rollout_0']['obs'][-1]
         if self.baseline_mode:
             init_qpos = self._robot_init_qpos[self.tasks[0]]
         else:
             init_qpos = self._robot_init_qpos[self.current_task]
-
         return init_qpos
 
     def reset(self, seed=None, options=None):

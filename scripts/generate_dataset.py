@@ -2,6 +2,7 @@ import os
 import numpy as np
 
 from argparse import ArgumentParser
+from time import strftime
 from eval import rollout_mdp
 from utils.wrapper import MDP
 '''
@@ -17,14 +18,15 @@ def generate_dataset(mdp: MDP, num_samples: int, save_path: str):
         :param save_path: directory to save dataset
     '''
     stats = rollout_mdp(mdp, eps=num_samples, required_success=True, verbose=False, render=False)
-    save_name = os.path.join(save_path, f'{mdp.env_name}_{mdp.policy}_{num_samples}_rollouts.npy')
+    save_name = os.path.join(save_path, f'{mdp.env_name}_{mdp.policy}_{num_samples}_{strftime("%Y%m%d-%H%M%S")}_rollouts.npy')
     np.save(save_name, stats)
 
     data = np.load(save_name, allow_pickle=True).item()
 
     rnd_idx = np.random.randint(0, num_samples)
-    rnd_rollout_data = data[f'rollout_{rnd_idx}']['data']
-    print(f'Run {rnd_idx} data shape: {np.shape(rnd_rollout_data)}') # For testing
+    rnd_rollout_data = data[f'rollout_{rnd_idx}']
+    print(f'Run {rnd_idx} data keys: {rnd_rollout_data.keys()}') # For testing
+    print(f"First subtask {rnd_rollout_data['subtask'][0]}")
 
 if __name__ == '__main__':
     parser = ArgumentParser()
