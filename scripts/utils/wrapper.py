@@ -41,31 +41,44 @@ class SequentialMDP():
 
 class MapsWrapper():
     def __init__(self, M: MDP, G: MDP, map_type: str, maps_dir: str, opt_params: Dict):
+        self.M = M
+        self.G = G
+        self.map_type = map_type
+        self.maps_dir = maps_dir
+        self.opt_params = opt_params
+
         self.f = {}
         self.g = {}
 
         self.f_optimizer = {}
         self.g_optimizer = {}
 
-        self.maps_dir = maps_dir
 
         # Initialize maps (f,g) - parameterized by subtasks in the compositional structure G
         # Since G shares when to transition with M, this means that f depends on the structure of G
         # TODO: the two cases here are straight forward; how to generalize to arbitrary cases/dimensions?
-        if map_type == 'linear':
+        if self.map_type == 'linear':
             if M.baseline:
                 self.f = {f'{task}': nn.Linear(M.state_space_dim, G.state_space_dim[f'{task}']) for task in G.tasks}
                 self.g = {f'{task}': nn.Linear(M.action_space_dim, G.action_space_dim[f'{task}']) for task in G.tasks}
             elif len(M.tasks) == len(G.tasks) == 1:
                 self.f[M.tasks[0]] = nn.Linear(M.state_space_dim[M.tasks[0]], G.state_space_dim[G.tasks[0]])
                 self.g[M.tasks[0]] = nn.Linear(M.action_space_dim[M.tasks[0]], G.action_space_dim[G.tasks[0]]) 
-        elif map_type == 'mlp':
+            elif len(M.tasks) == len(G.tasks): # special case for comp to comp
+                for M_task, G_task in zip(M.tasks, G.tasks):
+                    self.f[M_task] = nn.Linear(M.state_space_dim[M_task], G.state_space_dim[G_task])
+                    self.g[M_task] = nn.Linear(M.action_space_dim[M_task], G.action_space_dim[G_task])
+        elif self.map_type == 'mlp':
             if M.baseline:
                 self.f = {f'{task}': MLP(M.state_space_dim['baseline'], G.state_space_dim[f'{task}']) for task in G.tasks}
                 self.g = {f'{task}': MLP(M.action_space_dim['baseline'], G.action_space_dim[f'{task}']) for task in G.tasks}
             elif len(M.tasks) == len(G.tasks) == 1:
                 self.f[M.tasks[0]] = MLP(M.state_space_dim[M.tasks[0]], G.state_space_dim[G.tasks[0]])
                 self.g[M.tasks[0]] = MLP(M.action_space_dim[M.tasks[0]], G.action_space_dim[G.tasks[0]])
+            elif len(M.tasks) == len(G.tasks): # special case for comp to comp
+                for M_task, G_task in zip(M.tasks, G.tasks):
+                    self.f[M_task] = MLP(M.state_space_dim[M_task], G.state_space_dim[G_task])
+                    self.g[M_task] = MLP(M.action_space_dim[M_task], G.action_space_dim[G_task])
 
         # Initialize optimizers and starting epochs - if continue training, load previously saved optimizer state dictionaries.
         if self.maps_dir is not None:
@@ -75,21 +88,23 @@ class MapsWrapper():
             self.f_checkpoint, self.g_checkpoint = self.load_state_dict(maps_dir=os.path.join(maps_dir))
 
             for task in G.tasks:
-                self.f_optimizer[f'{task}'] = torch.optim.SGD(self.f[f'{task}'].parameters(), lr=opt_params['learning_rate'])
-                self.g_optimizer[f'{task}'] = torch.optim.SGD(self.g[f'{task}'].parameters(), lr=opt_params['learning_rate'])
-                self.f_optimizer[f'{task}'].load_state_dict(self.f_checkpoint[f'{task}']['optimizer_state_dict'])
-                self.g_optimizer[f'{task}'].load_state_dict(self.g_checkpoint[f'{task}']['optimizer_state_dict'])
+                self.f_optimizer[f'{task}'] = torch.optim.SGD(self.f[f'{task}'].parameters(), lr=self.opt_params['learning_rate'])
+                self.g_optimizer[f'{task}'] = torch.optim.SGD(self.g[f'{task}'].parameters(), lr=self.opt_params['learning_rate'])
+                self.f_optimizer[f'{task}'].load_state_dict(self.f_checkpoint['optimizer_state_dict'][f'{task}'])
+                self.g_optimizer[f'{task}'].load_state_dict(self.g_checkpoint['optimizer_state_dict'][f'{task}'])
 
             self.f_epoch = self.f_checkpoint['epoch']
             self.g_epoch = self.g_checkpoint['epoch']
+
+            # self.epoch = self.f_checkpoint['task_epoch']
         else:
             self.save_path = os.path.join(os.path.curdir, f'results/maps/{map_type}/{strftime("%Y%m%d-%H%M%S")}-id-{np.random.randint(10000)}')
 
             print(f'--- Training {map_type} maps ---')
 
             for task in G.tasks:
-                self.f_optimizer[f'{task}'] = torch.optim.SGD(self.f[f'{task}'].parameters(), lr=opt_params['learning_rate'])
-                self.g_optimizer[f'{task}'] = torch.optim.SGD(self.g[f'{task}'].parameters(), lr=opt_params['learning_rate'])
+                self.f_optimizer[f'{task}'] = torch.optim.SGD(self.f[f'{task}'].parameters(), lr=self.opt_params['learning_rate'])
+                self.g_optimizer[f'{task}'] = torch.optim.SGD(self.g[f'{task}'].parameters(), lr=self.opt_params['learning_rate'])
 
             self.f_epoch = 0
             self.g_epoch = 0
@@ -122,8 +137,10 @@ class MapsWrapper():
         # Return and load the state dict (from previous trained maps)
         f_checkpoint = torch.load(os.path.join(maps_dir, 'f.pt'))
         g_checkpoint = torch.load(os.path.join(maps_dir, 'g.pt'))
-        self.f.load_state_dict(f_checkpoint['model_state_dict'])
-        self.g.load_state_dict(g_checkpoint['model_state_dict'])
+
+        for task in self.G.tasks:
+            self.f[f'{task}'].load_state_dict(f_checkpoint['model_state_dict'][f'{task}'])
+            self.g[f'{task}'].load_state_dict(g_checkpoint['model_state_dict'][f'{task}'])
         
         return f_checkpoint, g_checkpoint
     
@@ -142,13 +159,15 @@ class MapsWrapper():
         f_state_dict, g_state_dict, f_optimizer_state_dict, g_optimizer_state_dict = self.state_dict()
 
         torch.save({
-                'epoch': {self.f_epoch + self.epoch[f'{task}'] for task in self.G.tasks},
+                'epoch': self.f_epoch,
+                'task_epoch': {self.f_epoch + self.epoch[f'{task}'] for task in self.G.tasks},
                 'model_state_dict': f_state_dict,
                 'optimizer_state_dict': f_optimizer_state_dict,
                }, os.path.join(self.save_path, 'f.pt'))
     
         torch.save({
-                'epoch': {self.g_epoch +self.epoch[f'{task}'] for task in self.G.tasks},
+                'epoch': self.g_epoch,
+                'task_epoch': {self.g_epoch +self.epoch[f'{task}'] for task in self.G.tasks},
                 'model_state_dict': g_state_dict,
                 'optimizer_state_dict': g_optimizer_state_dict,
                }, os.path.join(self.save_path, 'g.pt'))

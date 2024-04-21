@@ -15,27 +15,28 @@
     python scripts/learn_maps.py --input_env=BaselineLift-Panda --input_policy=PPO --input_dir=experiments/PPO/BaselineLift-Panda/20240108-084034-id-8993/models --input_tasks all --output_env=CompLift-Panda --output_policy=PPO --output_dir=experiments/PPO/CompLift-Panda/20240111-104724-id-1351/models --output_tasks all --epochs=10 --type=mlp --train_data_path=results/maps/datasets/BaselineLift-Panda_PPO_1000_20240122-113005_rollouts.npy
 '''
 import os
-
+import ml_collections.config_dict
 import numpy as np
+import matplotlib.pyplot as plt
 
 from time import strftime
-from argparse import ArgumentParser
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import ml_collections
+
+from config import create_maps_config
 
 from utils.wrapper import MDP, MapsWrapper
-from utils.loss_function import rlxBisimLoss
+from utils.loss_function import epsilonRlxBisimLoss
 from utils.dataset_wrappers import RobotDataset, RobotDatasetLive
 
 # torch device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def learn_maps(M: MDP, G: MDP, 
-               data_path=None, map_type: str = 'linear', 
-               epochs: int = 100, maps_dir=None) -> MapsWrapper:
+def learn_maps(cfg: ml_collections.ConfigDict, M: MDP, G: MDP) -> MapsWrapper:
     '''
         Learn maps (f: S -> S', g: A -> A') to test domain-agnostic generalization
 
@@ -45,18 +46,10 @@ def learn_maps(M: MDP, G: MDP,
         :param epochs: number of training epochs
         :param maps_dir: directory of previously trained maps (f,g)
     '''
-    # hyperparameters
-    opt_params = {'learning_rate': 1e-3}
-    batch_size = 1
-
-    # training parameters
-    log_every_epochs = 10
-    
-
-    maps = MapsWrapper(M, G, map_type=map_type, maps_dir=maps_dir, opt_params=opt_params)
+    maps = MapsWrapper(M, G, map_type=cfg.train.map_type, maps_dir=cfg.train.maps_path, opt_params=cfg.opt)
 
     # if skipping training
-    if epochs == 0: return maps
+    if cfg.train.epochs == 0: return maps
     
     # setup tensorboard
     log_path = os.path.join(maps.save_path, 'log')
@@ -68,17 +61,17 @@ def learn_maps(M: MDP, G: MDP,
     maps.to(device)
 
     maps.step = {f'{task}': 0 for task in G.tasks}
-    for epoch in range(epochs):
+    for epoch in range(cfg.train.epochs):
         cumulative_loss = {f'{task}': 0 for task in G.tasks}
-        if data_path is None:
+        if cfg.train.train_data_path is None:
             # Collect data live
-            # M_training_data = DataLoader(RobotDatasetLive(M), batch_size=batch_size, shuffle=True)
-            M_training_data = DataLoader(RobotDatasetLive(M), batch_size=batch_size)
+            training_data = DataLoader(RobotDatasetLive(M), batch_size=cfg.train.batch_size, shuffle=False)
         else:
-            M_training_data = DataLoader(RobotDataset(M, data_path), batch_size=batch_size)
+            training_data = DataLoader(RobotDataset(M, cfg.train.train_data_path), batch_size=cfg.train.batch_size, shuffle=False)
         # Batch training
-        for M_data, M_task in M_training_data:
-            current_task = M_task[0]
+        for data, task in training_data:
+            # print(task[0])
+            current_task = task[0]
             f_subtask = maps.f[current_task]
             g_subtask = maps.g[current_task]
 
@@ -91,16 +84,16 @@ def learn_maps(M: MDP, G: MDP,
             f_subtask_optimizer.zero_grad()
             g_subtask_optimizer.zero_grad()
             
-            M_data.to(device)
+            data.to(device)
 
             # Relaxed bisimulation loss
-            loss_fn = rlxBisimLoss
+            loss_fn = epsilonRlxBisimLoss
             loss = loss_fn(f_subtask, 
                            g_subtask, 
                            mdp_1=M, 
                            mdp_2=G,
                            task=current_task, 
-                           samples_1=M_data, 
+                           samples_1=data, 
                            device=device,
                     )
 
@@ -110,15 +103,24 @@ def learn_maps(M: MDP, G: MDP,
             g_subtask_optimizer.step()
 
             cumulative_loss[current_task] += loss.item()
-            maps.step[current_task] += 1
+            maps.epoch[current_task] += 1
 
-        step_loss = [v / (batch_size * len(M_training_data)) for v in cumulative_loss.values()]
+        step_loss = [v / (cfg.train.batch_size * len(training_data)) for v in cumulative_loss.values()]
         print(f"Epoch {maps.f_epoch + epoch}, losses: {step_loss}")
+
+        is_last_epoch = epoch == cfg.train.epochs - 1
         
-        if epoch % log_every_epochs == 0 or epoch == epochs - 1:
+        if epoch % cfg.train.log_every_epochs == 0 or is_last_epoch:
             for task in G.tasks:
-                writer.add_scalar(f"f loss/train - {task}", cumulative_loss[f'{task}'] / (batch_size * len(M_training_data)), maps.f_epoch + step[f'{task}'])
-                writer.add_scalar(f"g loss/train - {task}", cumulative_loss[f'{task}'] / (batch_size * len(M_training_data)), maps.g_epoch + step[f'{task}'])
+                writer.add_scalar(f"f loss/train - {task}", cumulative_loss[f'{task}'] / (cfg.train.batch_size * len(training_data)), maps.f_epoch + maps.epoch[f'{task}'])
+                writer.add_scalar(f"g loss/train - {task}", cumulative_loss[f'{task}'] / (cfg.train.batch_size * len(training_data)), maps.g_epoch + maps.epoch[f'{task}'])
+            writer.flush()
+
+        if epoch % cfg.train.eval_every_epochs == 0 or is_last_epoch:
+            epsilon = evaluate(M, G, maps)
+            for task in G.tasks:
+                writer.add_scalar(f"Validation Epsilon - {task}", epsilon[f'{task}'], epoch)
+            writer.flush()
 
     # Save models
     maps.save()
@@ -129,7 +131,7 @@ def learn_maps(M: MDP, G: MDP,
 
     return maps
 
-def evaluate(M: MDP, G: MDP, f, g, data_path: str = None):
+def evaluate(M: MDP, G: MDP, maps: MapsWrapper, data_path: str = None):
     '''
         Evaluate maps f and g on evaluation set
 
@@ -139,40 +141,70 @@ def evaluate(M: MDP, G: MDP, f, g, data_path: str = None):
         :param g: trained map g: A_1 -> A_2
     '''
     print(f'Evaluating f and g')
-    losses = []
-    epsilon = 0
+    traj_data = {f'{task}': [] for task in G.tasks}
+    losses = {f'{task}': [] for task in G.tasks}
+    epsilon = {f'{task}': 0 for task in G.tasks}
 
-    # TODO: for single task - generalize to multi-task 
-    f = f[M.tasks[0]] if len(M.tasks) == len(G.tasks) == 1 else None
-    g = g[M.tasks[0]] if len(M.tasks) == len(G.tasks) == 1 else None
 
     # Set maps to evaluation mode
-    f.eval()
-    g.eval()
+    maps.to(device)
+    maps.eval()
 
     if data_path is None:
-        test_set = DataLoader(RobotDatasetLive(M))
+        test_set = DataLoader(RobotDatasetLive(M), shuffle=False)
     else:
-        test_set = DataLoader(RobotDataset(M, data_path))
+        test_set = DataLoader(RobotDataset(M, data_path), shuffle=False)
     
+    task = []
     with torch.no_grad():
-        for data, task in test_set:
-            loss_fn = rlxBisimLoss
+        for data, tasks in test_set:
+            # print(tasks)
+            current_task = tasks[0]
+            f = maps.f[current_task]
+            g = maps.g[current_task]
+            loss_fn = epsilonRlxBisimLoss
             loss = loss_fn(f=f,
                         g=g,
                         mdp_1=M,
                         mdp_2=G,
+                        task=current_task,
                         samples_1=data,
                         device=device,
             )
 
             loss = loss.detach().numpy().item() # this is a singleton
-            if loss > epsilon: epsilon = loss
+            if loss > epsilon[current_task]: epsilon[current_task] = loss
 
-            losses.append(loss)
+            losses[current_task].append(loss)
 
-    print('losses:', losses)
-    print('epsilon:', epsilon)
+            if traj_data[current_task] == []: 
+                traj_data[current_task] = data
+            else:
+                traj_data[current_task] = torch.vstack((traj_data[current_task], data))
+            task.append(current_task)
+
+    """
+        TODO: print plots of s versus f(s) (where f: S1 -> S2), and a versus g(a) (where g: A1 -> A2)
+        What is f(s) and g(a) suppose to be?
+    """
+    for task in G.tasks:
+        traj_data[task] = traj_data[task].detach()
+    
+    fig, (ax_1, ax_2) = plt.subplots(2, 1)
+    lengths = [len(traj_data[task]) for task in G.tasks]
+
+    # state_labels = ['hand x', 'hand y', 'hand z']
+    # ax_1.plot(np.arange(lengths[0]), traj_data['reach'][:,0:3], label=state_labels)
+    # ax_1.plot(np.arange(lengths[0]), maps.f['reach'](traj_data['reach'][:,0:6].cuda()).detach().cpu()[:,0:3], label=['f hand x', 'f hand y', 'f hand z'])
+    # ax_1.legend()
+    # action_labels = ['x', 'y', 'z', 'g']
+    # ax_2.plot(np.arange(lengths[0]), traj_data['reach'][:,6:10], label=action_labels)
+    # ax_2.plot(t, maps.g['reach'](traj_data[:,6:10].cuda()).detach().cpu(), label=['g x', 'g y', 'g z', 'g g'])
+    # ax_2.legend()
+    # plt.show()
+
+    print('losses:', losses.items())
+    print('epsilon:', epsilon.items())
 
     return epsilon
 
@@ -190,12 +222,12 @@ def test_maps(M: MDP, G: MDP, f, g):
     - when MDP2 is in (s_2), check when f(s_1) = s_2 and apply the corresponding action a_1 MDP1 will take at s_1 and apply g(a_1) to MDP2
     '''
 
-    M_data = DataLoader(RobotDatasetLive(M), batch_size=M.horizon)
+    data = DataLoader(RobotDatasetLive(M), batch_size=M.horizon)
     # get states and actions
     # transform states and actions using (f,g)
 
     epsilon = 0
-    for data in M_data:
+    for data in data:
         M_states = data[:,0:6]
         M_actions = data[:,6:10]
         M_rwds = data[:,-1]
@@ -203,7 +235,7 @@ def test_maps(M: MDP, G: MDP, f, g):
         G_states = f(M_states)
         G_actions = g(M_actions)
 
-        e = rlxBisimLoss(f, g, M, G, data, device) # TODO: for this sample
+        e = epsilonRlxBisimLoss(f, g, M, G, data, device) # TODO: for this sample
 
         if e > epsilon: epsilon = e
 
@@ -224,45 +256,26 @@ def test_maps(M: MDP, G: MDP, f, g):
     return epsilon
 
 if __name__ == '__main__':
-    parser = ArgumentParser()
-    parser.add_argument('--input_env', type=str, required=True)                 # input gym env name (e.g. CompLift-IIWA)
-    parser.add_argument('--output_env', type=str, required=True)                # output gym env name (e.g. CompLift-Panda)
-    parser.add_argument('--input_policy', type=str, required=True)              # input policy name (e.g. PPO)
-    parser.add_argument('--output_policy', type=str, required=True)             # output policy name (e.g. PPO)
-    parser.add_argument('--input_tasks', type=str, nargs='*', required=True)    # input tasks
-    parser.add_argument('--output_tasks', type=str, nargs='*', required=True)   # output tasks
-    parser.add_argument('--input_dir', type=str, required=True)                 # input MDP dir
-    parser.add_argument('--output_dir', type=str, required=True)                # output compositional structure dir
-    parser.add_argument('--epochs', type=int, default=100)                      # num epochs for map training
-    parser.add_argument('--type', type=str, required=True)                      # map parameterization for (f,g)
-    parser.add_argument('--train_data_path', type=str)                          # training dataset path
-    parser.add_argument('--eval_data_path', type=str)                           # evaluation dataset path
-    parser.add_argument('--maps_dir', type=str)                                 # directory to save trained maps
-    args = parser.parse_args()
-
+    cfg = create_maps_config()
+    mdp_cfg = cfg.mdp
     # should have f,g for each subtask (mdp)?
-    input_mdp = MDP(env=args.input_env, 
-                    dir=args.input_dir, 
-                    policy=args.input_policy,
-                    tasks=args.input_tasks,
-                    baseline_mode=('baseline' in args.input_env.lower()),
+    input_mdp = MDP(env=mdp_cfg.input_env, 
+                    dir=mdp_cfg.input_path, 
+                    policy=mdp_cfg.input_policy,
+                    tasks=mdp_cfg.input_tasks,
+                    baseline_mode=('baseline' in mdp_cfg.input_env.lower()),
                     prefix='best_model',
                 )
-    output_mdp = MDP(env=args.output_env, 
-                     dir=args.output_dir, 
-                     policy=args.output_policy,
-                     tasks=args.output_tasks,
-                     baseline_mode=('baseline' in args.output_env.lower()),
+    output_mdp = MDP(env=mdp_cfg.output_env, 
+                     dir=mdp_cfg.output_path, 
+                     policy=mdp_cfg.output_policy,
+                     tasks=mdp_cfg.output_tasks,
+                     baseline_mode=('baseline' in mdp_cfg.output_env.lower()),
                      prefix='best_model',
                 )
    
-    train_data_path = args.train_data_path if args.train_data_path is not None else None
+    train_data_path = cfg.train.train_data_path
 
-    maps = learn_maps(input_mdp, 
-                      output_mdp, 
-                      data_path=train_data_path,
-                      map_type=args.type, 
-                      epochs=args.epochs, 
-                      maps_dir=args.maps_dir)
+    maps = learn_maps(cfg, input_mdp, output_mdp)
 
-    # epsilon = evaluate(input_mdp, output_mdp, f, g, data_path=args.eval_data_path)
+    epsilon = evaluate(input_mdp, output_mdp, maps, data_path=cfg.train.eval_data_path)

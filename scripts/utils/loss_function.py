@@ -6,12 +6,14 @@ from geomloss import SamplesLoss
 from utils.wrapper import MDP
 from utils.util import get_PPO_prob_dist
 
-def rlxBisimLoss(f: nn.Module, g: nn.Module, 
+# TODO: implement Amy Zhang's bisimulation loss
+
+def epsilonRlxBisimLoss(f: nn.Module, g: nn.Module, 
                  mdp_1: MDP, mdp_2: MDP, 
                  task: str, samples_1: torch.Tensor,
                  device=torch.device('cuda:0')) -> torch.Tensor:
     '''
-        Relaxed bisimulation loss 
+        Epsilon-relaxed bisimulation loss 
         - 2-norm for rewards
         - Wasserstein *-distance for action distributions
 
@@ -25,7 +27,7 @@ def rlxBisimLoss(f: nn.Module, g: nn.Module,
     losses = torch.empty(len(samples_1), dtype=torch.float32)
 
     for i in range(len(samples_1)):
-        # The first six columns of samples (stats['rollout_0']['data']) is the subtask observations
+        # The first "state_space_dim" columns of samples are the subtask observations
         # The next four columns of samples is the action vector (see _process_action in genx/environments/lift.py)
         # The last column is the reward
         if mdp_1.baseline:
@@ -36,6 +38,7 @@ def rlxBisimLoss(f: nn.Module, g: nn.Module,
             action_space_dim = mdp_1.action_space_dim[f'{task}']
         
         state_1 = samples_1[:,0:state_space_dim]
+        action_1 = samples_1[:,state_space_dim:state_space_dim+action_space_dim]
         
         # Save the means and standard deviations of the action distributions for each sampled subtask obs
         # TODO: generalize to other tasks

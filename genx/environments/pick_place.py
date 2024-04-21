@@ -6,22 +6,21 @@ from robosuite import load_controller_config
 from robosuite.robots.robot import Robot
 from gymnasium.envs.registration import register
 
-# from scripts.utils.wrapper import MDP
-
-class CompLiftEnv(gym.Env):
+class CompPickPlaceCanEnv(gym.Env):
     def __init__(self, robot="Panda", baseline_mode=False, training_mode=False, verbose=True, normalize_reward=False):
+        # Why not OSC_POSE?
         self._controller_config = load_controller_config(default_controller='OSC_POSITION')
         self._robot = robot
         self._verbose = verbose
         self._normalize_reward = normalize_reward
-        # Subtasks to complete the lift task (in order)
-        self.tasks = ['reach', 'grasp', 'lift']
+        # Subtasks to complete the pick and place task (in order)
+        self.tasks = ['reach', 'grasp', 'lift', 'move', 'place']
         
         self.current_task = self.tasks[0]
 
-        # Create the default robosuite lift environment
+        # Create separate environments for each subtask
         self._env = robosuite.make(
-            env_name="Lift",
+            env_name="PickPlaceCan",
             robots=self._robot,
             controller_configs=self._controller_config,
             has_renderer=True,
@@ -30,19 +29,10 @@ class CompLiftEnv(gym.Env):
             use_camera_obs=False,
             control_freq=10,
             horizon=100,
-            # reward_scale=1 if self._normalize_reward else None,
         )
         
         # The initial joint configuration of the robot depends on the subtask
         self._robot_init_qpos = {self.current_task: self._env.robots[0].init_qpos}
-
-        # hard-coded (for IIWA)
-        # self._robot_init_qpos['grasp'] = [0.01231588, 0.99710506, -0.02401533, -1.51316928, 0.03385481, 0.6337215, -0.02739373]
-        # self._robot_init_qpos['lift'] = [0.01231588, 0.99710506, -0.02401533, -1.51316928, 0.03385481, 0.6337215, 0.89631194]
-
-        # init joint positions for Panda (hard-coded)
-        # self._robot_init_qpos['grasp'] = [-0.02296645, 0.87523372, -0.00537831, -2.07363196, 0.02362597, 2.94811447, 0.73588951]
-        # self._robot_init_qpos['lift'] = [-0.023814369, 0.937344171, 0.000128018001, -1.96319784, 0.000138185644, 2.89760903, 0.764912129]
 
         if self._verbose:
             print(f'{self.current_task} initial joint configuration: {self._robot_init_qpos[self.current_task]}')
@@ -53,11 +43,15 @@ class CompLiftEnv(gym.Env):
             'reach': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32), # (x,y,z)
             'grasp': gym.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32), # (z,g)
             'lift': gym.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32), # (z,g)
+            'move': gym.spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32), # (x,y,z)
+            'place': gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32), # (z,g)
         }
         self.observation_spaces = {
             'reach': gym.spaces.Box(low=-10, high=10, shape=(6,), dtype=np.float32),
             'grasp': gym.spaces.Box(low=-5, high=5, shape=(3,), dtype=np.float32),
             'lift': gym.spaces.Box(low=-10, high=10, shape=(3,), dtype=np.float32),
+            'move': gym.spaces.Box(low=-10, high=10, shape=(6,), dtype=np.float32),
+            'place': gym.spaces.Box(low=-10, high=10, shape=(3,), dtype=np.float32),
         }
 
         self.reward_criteria = None
@@ -66,7 +60,6 @@ class CompLiftEnv(gym.Env):
         self.fresh_reset = False
         # In baseline mode, we train all tasks at once, so training_mode=False
         self.baseline_mode = baseline_mode
-        # In training mode, we train one subtask at a time.
         self.training_mode = False if self.baseline_mode else training_mode 
 
     @property
@@ -89,32 +82,33 @@ class CompLiftEnv(gym.Env):
         obs = self._env._get_observations() 
         
         hand_pos = obs['robot0_eef_pos']
-        cube_pos = obs['cube_pos']
-        gripper = obs['robot0_gripper_qpos'][0]
+        can_pos = obs['Can_pos']
+        goal_pos = self._env.target_bin_placements[self._env.object_to_id['can']]
+        gripper = obs['robot0_gripper_qpos'][0] * 2
 
         if self.baseline_mode:
-            # (hand_position, cube_position, gripper); np.shape(obs) == (7,)
-            obs = np.concatenate([hand_pos, cube_pos, [gripper]]).astype(np.float32)
+            # (hand_position, can_position, gripper); np.shape(obs) == (7,)
+            obs = np.concatenate([hand_pos, can_pos, [gripper]]).astype(np.float32)
             return obs
 
         if self.current_task == 'reach':
-            # (hand_position, cube_position); np.shape(obs) == (6,)
-            obs = np.concatenate([hand_pos, cube_pos]).astype(np.float32)
-        
+            # (hand_position, can_position); np.shape(obs) == (6,)
+            obs = np.concatenate([hand_pos, can_pos]).astype(np.float32)
         elif self.current_task == 'grasp':
             # (hand_z_position, cube_z_position, gripper); np.shape(obs) == (3,)
-            obs = np.concatenate([hand_pos[2:3], cube_pos[2:3], [gripper]]).astype(np.float32)
-
+            obs = np.concatenate([hand_pos[2:3], can_pos[2:3], [gripper]]).astype(np.float32)
         elif self.current_task == 'lift':
             # (hand_z_position, cube_z_position, gripper); np.shape(obs) == (3,)
-            obs = np.concatenate([hand_pos[2:3], cube_pos[2:3], [gripper]]).astype(np.float32)
-
+            obs = np.concatenate([hand_pos[2:3], can_pos[2:3], [gripper]]).astype(np.float32)
+        elif self.current_task == 'move':
+            obs = np.concatenate([hand_pos, can_pos]).astype(np.float32)
+        elif self.current_task == 'place':
+            obs = np.concatenate([hand_pos, can_pos, goal_pos, [gripper]]).astype(np.float32)
         else:
             raise RuntimeError('Invalid task')
         return obs
 
     def _process_action(self, action):
-        # These are deltas (see robosuite/controllers/osc.py)
         if self.baseline_mode:
             # Control eef x,y,z pos and gripper
             return action
@@ -124,38 +118,45 @@ class CompLiftEnv(gym.Env):
         elif self.current_task == 'grasp':
             # Control eef z pos and gripper only
             action = np.concatenate([[0, 0], action])
-
         elif self.current_task == 'lift':
             # Control eef z pos and gripper only
             action = np.concatenate([[0, 0], action])
-
+        elif self.current_task == 'move':
+            # Control eef x,y,z pos only
+            action = np.concatenate([action[:3], [1]])
+        elif self.current_task == 'place':
+            # Control eef z pos and gripper only
+            action = np.concatenate([[0, 0], action])
         else:
             raise RuntimeError('Invalid task')
-
+        
         assert len(action) == 4, f'action for task {self.current_task} is shape {np.shape(action)}. Expected (4,). The action is {action}'
 
         return action
      
     def _compute_reward_criteria(self, observation):
         hand_pos = observation['robot0_eef_pos'].copy()
-        cube_pos = observation['cube_pos'].copy()
-        table_height = self._env.model.mujoco_arena.table_offset[2]
-        # bin pos
+        can_pos = observation['Can_pos'].copy()
+        table_height = self._env.target_bin_placements[self._env.object_to_id['can']][2]
+        lift_height = table_height + 0.25
+        goal_pos = self._env.target_bin_placements[self._env.object_to_id['can']]
 
-        grasp_height = table_height + 0.01
-        lift_height = table_height + 0.05
+        reach_dist = np.linalg.norm(can_pos + np.array([0, 0, 0.005]) - hand_pos)
+        grasp_dist = np.linalg.norm([0, 0, 0.02] - can_pos)
+        lift_dist = np.linalg.norm([0, 0, lift_height] - can_pos)
+        move_dist = np.linalg.norm([goal_pos[0], goal_pos[1], lift_height] - can_pos)
+        goal_dist = np.linalg.norm(goal_pos - can_pos)
 
-        reach_dist = np.linalg.norm(cube_pos - hand_pos)
-        grasp_dist = np.linalg.norm(np.concatenate([cube_pos[:2],[grasp_height]]) - cube_pos)
-        lift_dist = np.linalg.norm(np.concatenate([cube_pos[:2],[lift_height]]) - cube_pos)
-        check_grasp = self._env._check_grasp(gripper=self._env.robots[0].gripper, object_geoms=self._env.cube)
-       
+        check_grasp = self._env._check_grasp(gripper=self._env.robots[0].gripper, object_geoms=self._env.objects[-1].contact_geoms)
+        
         criteria = {
             'reach_dist': reach_dist,
-            'cube_height': cube_pos[2],
+            'can_pos': can_pos,
             'grasp_dist': grasp_dist,
             'lift_dist': lift_dist,
             'lift_height': lift_height,
+            'move_dist': move_dist,
+            'goal_dist': goal_dist,
             'check_grasp': check_grasp,
         }
         return criteria
@@ -166,30 +167,18 @@ class CompLiftEnv(gym.Env):
         new_reward_criteria = self._compute_reward_criteria(observation)
         if self.baseline_mode:
             """
-                Using robosuite lift environment reward function:
-                    
-                Sparse reward of 2.25 if cube is lifted
+                Using robosuite pick and place environment reward function:
 
-                Summed reward shaping ([] for continuous, {} for discrete):
-                - Reaching in [0, 1], to encourage the arm to reach the cube
-                - Grasping in {0, 0.25}, non-zero if arm is grasping the cube
-                - Lifting in {0, 1}, non-zero if arm has lifted the cube          
+                - Reaching: in {0, [0, 0.1]}, proportional to the distance between the gripper and the closest object
+                - Grasping: in {0, 0.35}, nonzero if the gripper is grasping an object
+                - Lifting: in {0, [0, 1]}, nonzero only if object is grasped; proportional to lifting height
+                - Placing: in {0, [0.5, 0.7]}, nonzero only if object is lifted; proportional to distance from object to bin
+         
             """
-            if self._env._check_success():
-                # check if cube is lifted
-                task_completed = True
-                task_reward = 2.25
-            else:
-                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['reach_dist'])
-                if self._env._check_grasp(gripper=self._env.robots[0].gripper, object_geoms=self._env.cube): 
-                    # check if cube is grasped
-                    task_reward += 0.25
+            task_reward = self._env.reward()
         else:
             """
                 Compositional mode: separate reward functions for each subtask
-                - Reach: {[0,1], 2}, to encourage arm to reach the cube with sparse completion reward = 2
-                - Grasp: {0, 0.25}, non-zero if arm is grasping the cube
-                - Lift: {0, 2}, non-zero if arm has lifted the cube
             """
             if self.current_task == 'reach':
                 task_reward = 1 - np.tanh(10.0 * new_reward_criteria['reach_dist'])
@@ -198,26 +187,33 @@ class CompLiftEnv(gym.Env):
                     task_reward = 2
             
             elif self.current_task == 'grasp':
-                # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['grasp_dist'])
-                # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['reach_dist'])
+                # task_reward =  1 - np.tanh(10.0 * new_reward_criteria['grasp_dist'])
                 task_reward = 0
                 if new_reward_criteria['check_grasp']:
                     task_completed = True
                     task_reward += 0.25
             
             elif self.current_task == 'lift':
-                # task_reward = 1 - np.tanh(10.0 * new_reward_criteria['lift_dist'])
-                task_reward = 0
-                if new_reward_criteria['cube_height'] > new_reward_criteria['lift_height']: 
-                    # task is completed when cube is lifted
+                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['lift_dist'])
+                # can_height = new_reward_criteria['can_pos'][2]
+                if new_reward_criteria['lift_dist'] < 0.01: # if can is lifted
                     task_completed = True
-                    task_reward = 2.25
+                    task_reward = 2
+
+            elif self.current_task == 'move':
+                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['move_dist'])
+                if new_reward_criteria['move_dist'] < 0.01: # if can is lifted
+                        task_completed = True
+                        task_reward = 2
+            
+            elif self.current_task == 'place':
+                task_reward = 1 - np.tanh(10.0 * new_reward_criteria['goal_dist'])
+                if new_reward_criteria['goal_dist'] < 0.01:
+                    task_completed = True
+                    task_reward = 2
 
             else:
-                raise RuntimeError('Invalid subtask')
-        
-        if self._normalize_reward: 
-            reward /= 2.25
+                raise NotImplementedError(f'Invalid task {self.current_task}')
         
         self.reward_criteria = new_reward_criteria
         return task_reward, task_completed, task_failed
@@ -240,15 +236,14 @@ class CompLiftEnv(gym.Env):
         # Note: in training mode, we only train one subtask at a time.
         if task_completed and (not self.training_mode):
             if self.current_task == self.tasks[len(self.tasks) - 1]:
-                # Completed final subtask (lift), so completely reset environment 
+                # Completed final subtask (place), so completely reset environment 
                 # (set current_task to first subtask)
                 self.fresh_reset = True
                 info['task_success'] = True
             else:
-                if self._verbose:
-                    print(f"Completed subtask {self.current_task}, moving on to {self.tasks[self.tasks.index(self.current_task) + 1]}")
-                # Compositional training mode:
-                # completed current subtask so moving on to the next subtask
+                # if self._verbose:
+                print(f"Completed subtask {self.current_task}, moving on to {self.tasks[self.tasks.index(self.current_task) + 1]}")
+                # Compositional training mode: completed current subtask so moving on to the next subtask
                 self.current_task = self.tasks[self.tasks.index(self.current_task) + 1]
 
 
@@ -263,8 +258,8 @@ class CompLiftEnv(gym.Env):
                         observation['robot0_joint_pos_sin'],
                         observation['robot0_joint_pos_cos'],
                     )
-                # if self._verbose:
-                #     print(f"Setting initial joint configuration for subtask {self.current_task} to:", self._robot_init_qpos[self.current_task])
+                    # if self._verbose:
+                    print(f"Setting initial joint configuration for subtask {self.current_task} to:", self._robot_init_qpos[self.current_task])
         
         # Get obs (this depends on self.current_task, which may be updated above)
         obs = self._get_obs()
@@ -279,18 +274,12 @@ class CompLiftEnv(gym.Env):
         info['observation'] = observation                       # robosuite observation
         info['action'] = action                                 # robosuite action
         info['is_success'] = True if task_completed else False  # subtask success 
+        info['init_qpos'] = self._robot_init_qpos               # Initial qpos
 
         return obs, task_reward, terminated, task_failed, info
 
     def _setup_skip_reset(self):
         self.setup_skip_reset_once = True
-    
-    def _reset_robot_init_qpos(self):
-        if self.baseline_mode:
-            init_qpos = self._robot_init_qpos[self.tasks[0]]
-        else:
-            init_qpos = self._robot_init_qpos[self.current_task]
-        return init_qpos
 
     def reset(self, seed=None, options=None):
         if self.setup_skip_reset_once:
@@ -300,14 +289,10 @@ class CompLiftEnv(gym.Env):
                 # Reset current task to first task (reach)
                 if self._verbose:
                     print(f'Called reset right after task switch to {self.current_task}.')
-                self.current_task = self.tasks[0]            
-            # Reset the robosuite environment
+                self.current_task = self.tasks[0]
+            # Reset initial joint configuration to correct init_qpos based on subtask
             self._env.reset()
-            if self.training_mode:
-                # Reset initial joint configuration to correct init_qpos based on subtask
-                self._env.robots[0].init_qpos = self._reset_robot_init_qpos()
-                # Reset robot to reset to new init_qpos
-                self._env.robots[0].reset(deterministic=True)
+            self._env.robots[0].init_qpos = self._robot_init_qpos[self.current_task]
 
         obs = self._get_obs()
         self.reward_criteria = self._compute_reward_criteria(self._env._get_observations())
@@ -328,38 +313,37 @@ def register_envs():
         Register custom gymnasium environments
     """
     register(
-        id="CompLift-Panda",
-        entry_point=CompLiftEnv,
-        max_episode_steps=50,
-        kwargs={'robot': 'Panda', 'verbose': False}
+        id="CompPickPlaceCan-Panda",
+        entry_point=CompPickPlaceCanEnv,
+        max_episode_steps=100
     )
     register(
-        id="BaselineLift-Panda",
-        entry_point=CompLiftEnv,
-        max_episode_steps=50,
-        kwargs={'robot': 'Panda', 'baseline_mode': True, 'verbose': False}
+        id="BaselinePickPlaceCan-Panda",
+        entry_point=CompPickPlaceCanEnv,
+        max_episode_steps=100,
+        kwargs={'baseline_mode': True}
     )
     register(
-        id="CompLift-IIWA",
-        entry_point=CompLiftEnv,
-        max_episode_steps=50,
-        kwargs={'robot': 'IIWA', 'verbose': False}
+        id="CompPickPlaceCan-IIWA",
+        entry_point=CompPickPlaceCanEnv,
+        max_episode_steps=100,
+        kwargs={'robot': 'IIWA'}
     )
     register(
-        id="BaselineLift-IIWA",
-        entry_point=CompLiftEnv,
-        max_episode_steps=50,
-        kwargs={'robot': 'IIWA', 'baseline_mode': True, 'verbose': False}
+        id="BaselinePickPlaceCan-IIWA",
+        entry_point=CompPickPlaceCanEnv,
+        max_episode_steps=100,
+        kwargs={'robot': 'IIWA', 'baseline_mode': True}
     )
     register(
-        id="CompLift-Kinova3",
-        entry_point=CompLiftEnv,
-        max_episode_steps=50,
-        kwargs={'robot': 'Kinova3', 'verbose': False}
+        id="CompPickPlaceCan-Kinova3",
+        entry_point=CompPickPlaceCanEnv,
+        max_episode_steps=100,
+        kwargs={'robot': 'Kinova3'}
     )
     register(
-        id="BaselineLift-Kinova3",
-        entry_point=CompLiftEnv,
-        max_episode_steps=50,
-        kwargs={'robot': 'Kinova3', 'baseline_mode': True, 'verbose': False}
+        id="BaselinePickPlaceCan-Kinova3",
+        entry_point=CompPickPlaceCanEnv,
+        max_episode_steps=100,
+        kwargs={'robot': 'Kinova3', 'baseline_mode': True}
     )

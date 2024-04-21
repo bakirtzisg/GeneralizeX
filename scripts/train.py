@@ -12,33 +12,35 @@ from stable_baselines3 import SAC, PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 
+import config
 from utils.callback import StopTrainingOnSuccessRateThreshold
 from utils.util import find_file
 
-def train(args):
+def train(cfg):
     # Training parameters
-    ENV_NAME = args.env
-    POLICY = args.policy
-    DISCOUNT_RATE = args.gamma
-    TRAINING_STEPS = args.epochs
-    EVAL_FREQUENCY = args.eval_freq
-    EVAL_EPISODES = args.eval_ep
-    SAVE_FREQUENCY = args.save_freq
-    RESUME_TRAINING = args.resume_training
+    ENV_NAME = cfg.env
+    POLICY = cfg.policy
+    DISCOUNT_RATE = cfg.discount_rate
+    TRAINING_STEPS = cfg.epochs
+    EVAL_FREQUENCY = cfg.eval_freq
+    EVAL_EPISODES = cfg.eval_ep
+    SAVE_FREQUENCY = cfg.save_freq
+    RESUME_TRAINING = cfg.resume_training
     BASELINE_MODE = 'baseline' in ENV_NAME.lower()
-    SKIP_TASKS = args.skip_tasks
+    SKIP_TASKS = cfg.skip_tasks
+    DEVICE = cfg.device
     
     if BASELINE_MODE:
         assert 'baseline' in ENV_NAME.lower(), 'Conflict environment specification! Specified baseline training mode but not using baseline environment. Try again with correct --env flag.'
 
     # Model and log paths
-    MODEL_PREFIX = args.model_prefix
-    HOME_DIR = args.dir if RESUME_TRAINING else f'./experiments/{POLICY}/{ENV_NAME}/{strftime("%Y%m%d-%H%M%S")}-id-{np.random.randint(10000)}'
+    MODEL_PREFIX = cfg.model_prefix
+    HOME_DIR = cfg.dir if RESUME_TRAINING else f'./experiments/{POLICY}/{ENV_NAME}/{strftime("%Y%m%d-%H%M%S")}-id-{np.random.randint(10000)}'
     MODEL_PATH = os.path.join(HOME_DIR, 'models/')
     TB_PATH = os.path.join(HOME_DIR, 'tb/')
     LOG_PATH = os.path.join(HOME_DIR, 'log/')
 
-    device = torch.device('cuda', 0)
+    device = torch.device(DEVICE)
 
     # Initialize environment
     env = gym.make(ENV_NAME)
@@ -49,12 +51,12 @@ def train(args):
     agents = {} 
     tasks = ['baseline'] if BASELINE_MODE else env.unwrapped.tasks
 
-    if isinstance(args.success_thres, float):
+    if isinstance(cfg.success_thres, float):
         # if a scalar then set success threshold to be constant among all tasks
-        SUCCESS_THRESHOLD = args.success_thres * np.ones(len(tasks))
-    elif isinstance(args.success_thres, Sequence) and len(args.success_thres) == len(tasks):
+        SUCCESS_THRESHOLD = cfg.success_thres * np.ones(len(tasks))
+    elif isinstance(cfg.success_thres, Sequence) and len(cfg.success_thres) == len(tasks):
         # set individual success thresholds for each task
-        SUCCESS_THRESHOLD = args.success_thres
+        SUCCESS_THRESHOLD = cfg.success_thres
     else:
         raise RuntimeError("Invalid success threshold flag")
 
@@ -146,23 +148,5 @@ def train(args):
         agent.save(os.path.join(MODEL_PATH, f'{task}_final.zip'))
 
 if __name__ == '__main__':
-    # Parser
-    parser = ArgumentParser()
-    # Model parameters
-    parser.add_argument('--env', type=str, default='BaselineLift-Panda')
-    parser.add_argument('--dir', type=str, default='')
-    parser.add_argument('--policy', type=str, default='SAC')
-    parser.add_argument('--model_prefix', type=str, default='')
-    parser.add_argument('--resume_training', action='store_true')
-    parser.add_argument('--skip_tasks', type=str, nargs='*', default=[])
-    # Training parameters
-    parser.add_argument('--success_thres', type=float, nargs='*', default=0.95)
-    parser.add_argument('--gamma', type=float, default=0.96)
-    parser.add_argument('--epochs', type=int, default=int(2.5e5))
-    parser.add_argument('--eval_freq', type=int, default=int(1e4))
-    parser.add_argument('--eval_ep', type=int, default=20)
-    parser.add_argument('--save_freq',type=int,default=int(5e3))
-
-    args = parser.parse_args()
-
-    train(args)
+    cfg = config.train_cfg()
+    train(cfg)

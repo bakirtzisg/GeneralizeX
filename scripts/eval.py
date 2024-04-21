@@ -6,9 +6,9 @@ import sys
 import numpy as np
 import gymnasium as gym 
 
-from argparse import ArgumentParser
 from stable_baselines3 import SAC
 
+import config
 from utils.util import *
 from utils.wrapper import MDP
 
@@ -61,6 +61,7 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=Fals
                                               np.array(reward_buffer)[:np.shape(subtask_obs_buffer[f'{task}'])[0]].T)) 
                                               for task in tasks}  
             else:
+                print(reward_criteria_buffer)
                 if verbose: print(f'Subtask {env.unwrapped.current_task} success:', info['is_success'])
                 stats[f'rollout_{counter}']['is_success'] = 0
             
@@ -110,6 +111,8 @@ def rollout(env, agents, baseline_mode, eps=1, tasks=None, required_success=Fals
         reward_buffer.append(reward)
         reward_criteria_buffer.append(info['reward_criteria'])
 
+        # print('init qpos', info['init_qpos'])
+
         if render:
             env.render()
         # required_success determines whether to only count successful runs
@@ -127,26 +130,20 @@ def rollout_mdp(M, eps=1, required_success=False, verbose=True, render=True):
     return stats
 
 if __name__ == '__main__':
-    # Parser
-    parser = ArgumentParser()
-    parser.add_argument('--env', type=str, required=True)
-    parser.add_argument('--dir', type=str, required=True)
-    parser.add_argument('--policy', type=str, required=True)
-    parser.add_argument('--eps', type=int, default=1)
-    parser.add_argument('--tasks', type=str, nargs='*', default='all')
-    parser.add_argument('--prefix', type=str, default='*')
-    args = parser.parse_args()
+    cfg = config.eval_cfg()
 
-    BASELINE_MODE = 'baseline' in args.env.lower()
+    BASELINE_MODE = 'baseline' in cfg.env.lower()
     # Test MDP wrapper
-    M = MDP(env=args.env, 
-            dir=args.dir, 
-            policy=args.policy, 
+    M = MDP(env=cfg.env, 
+            dir=cfg.dir, 
+            policy=cfg.policy, 
             baseline_mode=BASELINE_MODE, 
-            tasks=args.tasks,
-            prefix=args.prefix,
+            tasks=cfg.tasks,
+            prefix=cfg.prefix,
         )
 
     # Evaluate
-    info = rollout_mdp(M, eps=args.eps)
+    info = rollout_mdp(M, eps=cfg.eps)
+    print('Subtask', info['rollout_0']['subtask'])
+    print('Reward criteria', info['rollout_0']['reward_criteria'])
     print(f'Success rate: {info["success_rate"]}')
