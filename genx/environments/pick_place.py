@@ -252,9 +252,13 @@ class CompPickPlaceCanEnv(gym.Env):
         if self.current_task != self.tasks[-1] and not self.baseline_mode:
             # next_task = self.tasks[self.tasks.index(self.current_task) + 1]
             if task_completed:
+                if self.training_mode:
+                    next_task = self.tasks[self.tasks.index(self.current_task) + 1]
+                else:
+                    next_task = self.current_task
                 # Check if robot_init_qpos for next_task has been set. If not, set it to final qpos of previous task
-                if self._robot_init_qpos.get(self.current_task) is None:
-                    self._robot_init_qpos[self.current_task] = np.arctan2(
+                if self._robot_init_qpos.get(next_task) is None:
+                    self._robot_init_qpos[next_task] = np.arctan2(
                         observation['robot0_joint_pos_sin'],
                         observation['robot0_joint_pos_cos'],
                     )

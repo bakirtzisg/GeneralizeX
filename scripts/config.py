@@ -68,7 +68,7 @@ def train_cfg():
         'success_thres': 0.95,
         'model_prefix': '',
         'dir': '',
-        'device': 'cpu', # or 'cuda' for GPU
+        'device': 'cuda', # or 'cuda' for GPU
     })
 
     return cfg
